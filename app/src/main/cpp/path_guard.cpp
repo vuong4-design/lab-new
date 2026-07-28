@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <link.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -135,6 +136,30 @@ bool IsMapsHeader(const std::string& line) {
     return true;
 }
 
+// Beyond name-based leaks, the generic *shape* of injected native code is an
+// executable mapping not backed by a real on-disk file: memfd copies of our
+// helper libraries and inline-hook trampolines that surface as "[anonymous]"
+// or "(deleted)". Legitimate library text is file-backed (/system, /apex,
+// /vendor, the app lib dir), so we drop executable, non-file-backed blocks.
+bool IsInjectionShape(const std::string& header) {
+    size_t sp = header.find(' ');
+    if (sp == std::string::npos || sp + 4 > header.size()) return false;
+    const char* perms = header.c_str() + sp + 1;   // "rwxp"
+    if (perms[2] != 'x') return false;             // executable mappings only
+    if (header.find("(deleted)") != std::string::npos) return true;
+    if (header.find("/memfd:") != std::string::npos) return true;
+    if (header.find("[anon") != std::string::npos) return true;  // [anonymous]/[anon:...]
+    // Executable, inode 0, and no trailing pathname => anonymous exec page.
+    unsigned long a = 0, b = 0, off = 0;
+    unsigned int maj = 0, min = 0;
+    unsigned long ino = 0;
+    char pr[5] = {};
+    char pathBuf[8] = {};
+    int n = sscanf(header.c_str(), "%lx-%lx %4s %lx %x:%x %lu %7s",
+                   &a, &b, pr, &off, &maj, &min, &ino, pathBuf);
+    return n == 7 && ino == 0;  // parsed through inode with nothing after = no path
+}
+
 // Drop the whole mapping block (header + any smaps detail lines) for sensitive
 // entries; keep everything else verbatim.
 std::string FilterMaps(const std::string& raw) {
@@ -147,7 +172,7 @@ std::string FilterMaps(const std::string& raw) {
         bool hasNl = (nl != std::string::npos);
         if (!hasNl) nl = raw.size();
         std::string line = raw.substr(i, nl - i);
-        if (IsMapsHeader(line)) dropBlock = IsSensitive(line);
+        if (IsMapsHeader(line)) dropBlock = IsSensitive(line) || IsInjectionShape(line);
         if (!dropBlock) {
             out += line;
             if (hasNl) out += '\n';
@@ -291,6 +316,28 @@ ssize_t my_readlinkat(int dirfd, const char* path, char* buf, size_t bufsiz) {
     return MaskLink(n, buf, bufsiz);
 }
 
+// dl_iterate_phdr enumerates every loaded ELF; detectors use it to read each
+// module's soname (e.g. "liblsplant.so") without touching /proc. We wrap the
+// caller's callback and silently skip entries whose dlpi_name is sensitive, so
+// our helper libraries and memfd images disappear from the enumeration too.
+using DlIterFn = int (*)(int (*)(struct dl_phdr_info*, size_t, void*), void*);
+DlIterFn orig_dl_iterate_phdr = nullptr;
+
+struct DlIterCtx {
+    int (*cb)(struct dl_phdr_info*, size_t, void*);
+    void* data;
+};
+int DlIterTrampoline(struct dl_phdr_info* info, size_t size, void* data) {
+    auto* ctx = static_cast<DlIterCtx*>(data);
+    if (info && info->dlpi_name && IsSensitive(info->dlpi_name)) return 0;  // skip
+    return ctx->cb(info, size, ctx->data);
+}
+int my_dl_iterate_phdr(int (*cb)(struct dl_phdr_info*, size_t, void*), void* data) {
+    if (!orig_dl_iterate_phdr) return 0;
+    DlIterCtx ctx{cb, data};
+    return orig_dl_iterate_phdr(&DlIterTrampoline, &ctx);
+}
+
 void RegisterOnModule(dev_t dev, ino_t inode) {
     if (dlsym(RTLD_DEFAULT, "openat"))
         ZygiskPltHookRegister(dev, inode, "openat", reinterpret_cast<void*>(&my_openat), reinterpret_cast<void**>(&orig_openat));
@@ -306,6 +353,8 @@ void RegisterOnModule(dev_t dev, ino_t inode) {
         ZygiskPltHookRegister(dev, inode, "readlink", reinterpret_cast<void*>(&my_readlink), reinterpret_cast<void**>(&orig_readlink));
     if (dlsym(RTLD_DEFAULT, "readlinkat"))
         ZygiskPltHookRegister(dev, inode, "readlinkat", reinterpret_cast<void*>(&my_readlinkat), reinterpret_cast<void**>(&orig_readlinkat));
+    if (dlsym(RTLD_DEFAULT, "dl_iterate_phdr"))
+        ZygiskPltHookRegister(dev, inode, "dl_iterate_phdr", reinterpret_cast<void*>(&my_dl_iterate_phdr), reinterpret_cast<void**>(&orig_dl_iterate_phdr));
 }
 
 // Walk /proc/self/maps and register the guard on every distinct (dev,inode)

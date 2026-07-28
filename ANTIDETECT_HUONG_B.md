@@ -92,3 +92,45 @@ không đụng tới `open()` runtime nên giữ nguyên, an toàn.
 thêm dòng `native.guard=on` vào `device_profile.conf`. Nếu app nào đó
 không ổn → xóa dòng đó, guard tắt lại. Guard **không bao giờ** chạm
 system_server.
+
+
+---
+
+## HOTFIX 2 (2026-07-28, sau khi đã boot ổn) — 2 phát hiện còn lại
+
+Máy đã boot & spoof hoạt động. Detector còn báo:
+1. **Detected Magisk Module: liblsplant.so** (tên soname).
+2. **Found Injection / Anonymous executable code**: `/memfd:jit-cache (deleted)`
+   r-xp và các map `[anonymous]` r-xp.
+
+### Bug thật được sửa (java_loader.cpp)
+Tên memfd hiện trong `/proc/self/maps` do `memfd_create(name)` quyết định, chứ
+KHÔNG phải `identity` truyền cho `android_dlopen_ext`. Bản B2 đa dạng hóa
+nhầm `identity` nên 6 lib vẫn hiện `/memfd:jit-cache`. Nay tính `pick` (tên
+kiểu ART theo hash đường dẫn) TRƯỚC rồi truyền thẳng cho `memfd_create(pick)`,
+đồng bộ với `identity`. => nhãn maps không còn trùng lặp.
+
+### Guard được mở rộng (path_guard.cpp, chỉ khi native.guard=on, app-only)
+- **FilterMaps + IsInjectionShape**: ngoài lọc theo tên, giờ bỏ luôn mọi map
+  **executable không backed bởi file thật**: `(deleted)`, `/memfd:`, `[anon...]`,
+  hoặc anonymous (inode 0, không có path). => ẩn được “Found Injection” và
+  “Anonymous executable code” khỏi maps mà app tự đọc.
+- **Hook dl_iterate_phdr**: bọc callback, bỏ qua entry có `dlpi_name` nhạy cảm
+  (ví dụ `liblsplant.so`). Nhiều detector đọc soname qua API này thay vì /proc.
+
+### GIỚI HẠN QUAN TRỌNG (phải hiểu rõ)
+Hai phát hiện này là **shape-based** (hình dạng code tiêm), khác với các vết
+“đường dẫn” trước. Về nguyên tắc, một tiến trình đọc `/proc/self/maps` của
+CHÍNH NÓ sẽ luôn thấy code tiêm dưới dạng map executable không phải file
+hệ thống. Cách DUY NHẤT ẩn là **can thiệp chính việc app đọc maps** = path
+guard. Nhưng:
+- Guard chỉ có tác dụng với detector đọc qua **libc open/fopen/dl_iterate_phdr**.
+- Detector đọc bằng **raw syscall** (openat trực tiếp), hoặc đọc
+  `/proc/self/map_files/`, `/proc/self/smaps_rollup`, hoặc parse ELF trong bộ
+  nhớ → **vượt qua** guard này. Muốn chặn tận gốc phải làm ở tầng
+  syscall/seccomp hoặc kernel — ngoài phạm vi userspace hook.
+- Trampoline inline-hook (Dobby/lsplant) vốn là trang exec ẩn danh; không thể
+  bỏ hoàn toàn mà vẫn hook — chỉ có thể ẩn khỏi *góc nhìn maps*.
+
+Để thử nghiệm chống 2 phát hiện này: đặt `native.guard=on` trong
+`device_profile.conf` (chỉ tác dộng app, không động system_server), rồi test kỹ.

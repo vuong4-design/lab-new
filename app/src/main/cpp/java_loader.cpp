@@ -329,7 +329,20 @@ void* DlopenStealth(const std::string& path, const char* tag) {
         close(src);
         return dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
     }
-    int mfd = MemfdCreateCompat(tag);
+    // Derive a plausible, per-library ART/anon name from the path. This name is
+    // what the KERNEL reports in /proc/self/maps ("/memfd:<pick>"), so it must
+    // be set on the memfd itself here -- NOT only on the android_dlopen_ext
+    // identity, which does not change the maps label. Distinct names also avoid
+    // several identical "/memfd:jit-cache" mappings, which is itself an anomaly.
+    static const char* kNames[] = {
+            "jit-cache", "dalvik-jit-code-cache", "framework",
+            "boot-image", "libart-cache",
+    };
+    unsigned int hsh = 2166136261u;
+    for (char c : path) hsh = (hsh ^ static_cast<unsigned char>(c)) * 16777619u;
+    const char* pick = kNames[hsh % (sizeof(kNames) / sizeof(kNames[0]))];
+
+    int mfd = MemfdCreateCompat(pick);
     if (mfd < 0) {
         close(src);
         return dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
@@ -365,16 +378,7 @@ void* DlopenStealth(const std::string& path, const char* tag) {
     android_dlextinfo extinfo {};
     extinfo.flags = ANDROID_DLEXT_USE_LIBRARY_FD;
     extinfo.library_fd = mfd;
-    // Neutral, per-library identity: neither a /data/adb path nor a repeated
-    // tag. Three identical "/memfd:jit-cache" maps would itself be an anomaly,
-    // so derive a plausible ART/anon name deterministically from the path.
-    static const char* kNames[] = {
-            "jit-cache", "dalvik-jit-code-cache", "framework",
-            "boot-image", "libart-cache",
-    };
-    unsigned int hsh = 2166136261u;
-    for (char c : path) hsh = (hsh ^ static_cast<unsigned char>(c)) * 16777619u;
-    const char* pick = kNames[hsh % (sizeof(kNames) / sizeof(kNames[0]))];
+    // Keep the linker soinfo name consistent with the memfd name chosen above.
     const std::string identity = std::string("/memfd:") + pick;
     void* handle = android_dlopen_ext(identity.c_str(),
                                       RTLD_NOW | RTLD_GLOBAL, &extinfo);

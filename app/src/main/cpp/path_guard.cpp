@@ -338,18 +338,43 @@ void ForEachLoadedModule() {
     }
 }
 
+// Identify system_server via a RAW read of /proc/self/cmdline (never through
+// the libc we are about to hook). Intercepting open()/openat() inside
+// system_server is both unnecessary (a detector inspects its *own* app
+// process, not system_server) and catastrophic: a single bad interception
+// there crash-loops the whole device. We refuse to guard it, always.
+bool IsSystemServer() {
+    char buf[64] = {};
+    int fd = raw_open("/proc/self/cmdline", O_RDONLY);
+    if (fd < 0) return false;
+    ssize_t n = raw_read(fd, buf, sizeof(buf) - 1);
+    raw_close(fd);
+    if (n <= 0) return false;
+    // cmdline is NUL-delimited; the first field is the process name.
+    return std::string(buf) == "system_server";
+}
+
 }  // namespace
 
 void InstallPathGuardHooks() {
+    // OPT-IN ONLY. This guard PLT-hooks the hot open()/openat()/fopen() family
+    // across every loaded module; a fault anywhere on that path brings down the
+    // whole process. It now stays OFF unless the profile explicitly sets
+    // native.guard=on, so a stock install can never boot-loop because of it.
     std::string flag;
-    if (LookupProperty("native.guard", flag) && flag == "off") {
-        DS_LOGW("audit:path guard disabled by profile (native.guard=off)");
+    if (!(LookupProperty("native.guard", flag) && flag == "on")) {
+        DS_LOGW("audit:path guard OFF (set native.guard=on to enable; app processes only)");
+        return;
+    }
+    // Hard refusal in system_server regardless of the flag.
+    if (IsSystemServer()) {
+        DS_LOGW("audit:path guard refused in system_server (unsafe/unneeded)");
         return;
     }
     // Registers hooks only; the shared ZygiskPltHookCommit() in
     // InstallPropertyHooks() commits this batch together with the others.
     ForEachLoadedModule();
-    DS_LOGW("audit:path guard registered (maps/smaps/meminfo/sys-net/readlink)");
+    DS_LOGW("audit:path guard registered (app process only; maps/smaps/meminfo/sys-net/readlink)");
 }
 
 }  // namespace ds

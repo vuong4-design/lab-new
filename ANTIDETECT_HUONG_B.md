@@ -59,3 +59,36 @@ và soinfo->soname sẽ không còn báo “libds_java_hooks.so”.
   (refactor lớn, nên làm riêng).
 - App đọc `/proc` bằng raw syscall (không qua libc) sẽ bỏ qua guard này —
   muốn chặn phải hook tầng syscall (seccomp/svc), ngoài phạm vi hiện tại.
+
+
+---
+
+## HOTFIX (2026-07-28, sau build đầu tiên)
+
+**Triệu chứng:** boot-loop. `system_server` bị `SIGSEGV (SEGV_ACCERR)` lặp
+lại, lỗi ở cùng offset trang (`...f40`) mỗi lần → cùng một lệnh lỗi dưới ASLR.
+
+**Nguyên nhân:** `InstallPathGuardHooks()` PLT-hook họ `open/openat/fopen`
+trên *mọi module* ngay trong `system_server`. Đây vừa thừa (trình dò đọc
+`/proc` của *chính app*, không phải system_server) vừa cực kỳ nguy hiểm:
+`open/openat` được gọi trong những ngữ cảnh rất sớm/nhạy cảm của
+system_server, chỉ cần một lỗi trên đường đó là sập cả máy. Đúng rủi ro
+đã cảnh báo.
+
+**Khắc phục:**
+1. Path guard chuyển thành **opt-in**: chỉ chạy khi profile đặt
+   `native.guard=on`. Mặc định **TẮT** → bản cài gốc không bao giờ boot-loop
+   vì module này nữa.
+2. **Từ chối tuyệt đối trong system_server**: `IsSystemServer()` đọc
+   `/proc/self/cmdline` bằng raw syscall; nếu là system_server thì không cài
+   guard dù có bật flag.
+3. Guard (khi bật) chỉ cài trong **app process** — đúng nơi trình dò đọc
+   `/proc/self/maps` của chính nó.
+
+Ba thay đổi tĩnh còn lại của Hướng B (XOR path, đa dạng tên memfd, soname)
+không đụng tới `open()` runtime nên giữ nguyên, an toàn.
+
+**Cách bật guard sau khi máy đã ổn định (tự chịu trách nhiệm, phải test):**
+thêm dòng `native.guard=on` vào `device_profile.conf`. Nếu app nào đó
+không ổn → xóa dòng đó, guard tắt lại. Guard **không bao giờ** chạm
+system_server.

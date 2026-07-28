@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DeviceSpoofLabs-Hooks</string>
+    <string name="app_title">Device Spoof Labs</string>
+    <string name="select_all_label">Enable all</string>
+    <string name="android_version_label">Android version</string>
+    <string name="android_version_decrement">-</string>
+    <string name="android_version_increment">+</string>
+    <string name="action_copy">Copy</string>
+    <string name="action_edit">Edit</string>
+    <string name="action_randomize">Randomize</string>
+    <string name="action_randomize_all">Randomize all</string>
+    <string name="copied_toast">Copied to clipboard</string>
+    <string name="edit_dialog_title">Edit %1$s</string>
+    <string name="dialog_save">Save</string>
+    <string name="dialog_cancel">Cancel</string>
+    <string name="invalid_value">Value doesn\'t match expected format</string>
+    <string name="save_failed">Failed to save: %1$s</string>
+    <string name="timezone_label">Timezone</string>
+    <string name="timezone_dialog_title">Select timezone</string>
+    <string name="timezone_search_hint">Search...</string>
+    <string name="scope_label">Target apps (scope)</string>
+    <string name="scope_summary_empty">No apps selected - tap to add</string>
+    <string name="scope_summary_count">%1$d app(s) selected</string>
+    <string name="scope_dialog_title">Target packages</string>
+    <string name="scope_dialog_hint">One package name per line\ne.g. com.example.app</string>
+    <string name="scope_saved_restart_hint">Scope saved. Force-stop the target app for changes to take effect.</string>
+    <string name="config_saved_restart_hint">Saved. Force-stop the target app for changes to take effect.</string>
+
+    <!-- Legacy LSPosed metadata kept only for managers that inspect it. The
+         active Zygisk build uses the in-app Target apps screen instead. -->
+    <string-array name="xposed_scope">
+        <item>com.google.android.gms</item>
+    </string-array>
+</resources>

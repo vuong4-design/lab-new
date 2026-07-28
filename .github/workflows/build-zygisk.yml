@@ -1,0 +1,134 @@
+name: Build Zygisk Module
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      - name: Build APK + native libraries (all ABIs)
+        run: ./gradlew assembleRelease
+
+      - name: Assemble Zygisk module ZIP
+        run: |
+          set -eu
+          MODULE_DIR=module
+          OUT_DIR=build/zygisk-module
+          rm -rf "$OUT_DIR"
+          mkdir -p "$OUT_DIR/zygisk"
+          mkdir -p "$OUT_DIR/apk"
+
+          # Copy the static module skeleton (module.prop, customize.sh, scripts).
+          cp "$MODULE_DIR/module.prop"     "$OUT_DIR/"
+          cp "$MODULE_DIR/customize.sh"    "$OUT_DIR/"
+          [ -f "$MODULE_DIR/post-fs-data.sh" ] && cp "$MODULE_DIR/post-fs-data.sh" "$OUT_DIR/"
+          [ -f "$MODULE_DIR/service.sh" ]     && cp "$MODULE_DIR/service.sh"     "$OUT_DIR/"
+          [ -f "$MODULE_DIR/uninstall.sh" ]   && cp "$MODULE_DIR/uninstall.sh"   "$OUT_DIR/"
+          [ -f "$MODULE_DIR/sepolicy.rule" ]  && cp "$MODULE_DIR/sepolicy.rule"  "$OUT_DIR/"
+
+          # Map each built ABI .so to the Zygisk per-ABI filename.
+          OBJ_ROOT=$(find app/build/intermediates/cxx -type d -name obj | head -n1)
+          if [ -z "$OBJ_ROOT" ]; then
+            echo "Native obj dir not found" >&2
+            exit 1
+          fi
+          echo "Using obj root: $OBJ_ROOT"
+
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            so="$OBJ_ROOT/$abi/libds_native.so"
+            if [ -f "$so" ]; then
+              if readelf -d "$so" | grep -E 'NEEDED.*(liblsplt|liblsplant|libc\+\+_shared)'; then
+                echo "$so still depends on external preload libraries" >&2
+                exit 1
+              fi
+              cp "$so" "$OUT_DIR/zygisk/$abi.so"
+              echo "Packaged $abi"
+            else
+              echo "Missing $so" >&2
+              exit 1
+            fi
+          done
+
+          echo "Zygisk entrypoints are self-contained; no extra preload dependencies packaged."
+
+          JNI_ROOT=$(find app/build/intermediates -type d -path '*/out/lib' | head -n1)
+          if [ -z "$JNI_ROOT" ]; then
+            echo "Merged JNI lib dir not found" >&2
+            exit 1
+          fi
+          mkdir -p "$OUT_DIR/system/lib" "$OUT_DIR/system/lib64"
+          mkdir -p "$OUT_DIR/lib/arm64-v8a" "$OUT_DIR/lib/armeabi-v7a"
+
+          cp "$OBJ_ROOT/arm64-v8a/libds_java_hooks.so" "$OUT_DIR/system/lib64/"
+          cp "$JNI_ROOT/arm64-v8a/liblsplant.so" "$OUT_DIR/system/lib64/"
+          [ -f "$JNI_ROOT/arm64-v8a/libc++_shared.so" ] && cp "$JNI_ROOT/arm64-v8a/libc++_shared.so" "$OUT_DIR/system/lib64/"
+          cp "$OBJ_ROOT/arm64-v8a/libds_java_hooks.so" "$OUT_DIR/lib/arm64-v8a/"
+          cp "$JNI_ROOT/arm64-v8a/liblsplant.so" "$OUT_DIR/lib/arm64-v8a/"
+          [ -f "$JNI_ROOT/arm64-v8a/libc++_shared.so" ] && cp "$JNI_ROOT/arm64-v8a/libc++_shared.so" "$OUT_DIR/lib/arm64-v8a/"
+
+          cp "$OBJ_ROOT/armeabi-v7a/libds_java_hooks.so" "$OUT_DIR/system/lib/"
+          cp "$JNI_ROOT/armeabi-v7a/liblsplant.so" "$OUT_DIR/system/lib/"
+          [ -f "$JNI_ROOT/armeabi-v7a/libc++_shared.so" ] && cp "$JNI_ROOT/armeabi-v7a/libc++_shared.so" "$OUT_DIR/system/lib/"
+          cp "$OBJ_ROOT/armeabi-v7a/libds_java_hooks.so" "$OUT_DIR/lib/armeabi-v7a/"
+          cp "$JNI_ROOT/armeabi-v7a/liblsplant.so" "$OUT_DIR/lib/armeabi-v7a/"
+          [ -f "$JNI_ROOT/armeabi-v7a/libc++_shared.so" ] && cp "$JNI_ROOT/armeabi-v7a/libc++_shared.so" "$OUT_DIR/lib/armeabi-v7a/"
+          echo "Packaged Java hook helper libs into system/lib* and module lib/*"
+
+          # Keep the APK as a separate artifact. APatch may not expose a
+          # module-mounted system/priv-app package to the launcher, and a
+          # user-installed APK gives a reliable icon/class path.
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n1)
+          if [ -z "$APK" ]; then
+            echo "Release APK not found" >&2
+            exit 1
+          fi
+          cp "$APK" "$OUT_DIR/apk/DeviceSpoofLab.apk"
+          echo "Built standalone APK: $APK"
+          echo "Packaged APK classpath fallback into apk/DeviceSpoofLab.apk"
+
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -n1)
+          if [ -z "$AAPT2" ]; then
+            echo "aapt2 not found; skipping launcher icon resource dump" >&2
+          elif ! "$AAPT2" dump resources "$APK" | grep -q 'mipmap/ic_launcher'; then
+            echo "Launcher icon resource name not visible in aapt2 dump; manifest compile already verified @mipmap/ic_launcher exists."
+            echo "Continuing because AAPT2 may compile vector/adaptive icon files into resources.arsc."
+          fi
+
+          # Zip the module (contents at archive root, not nested).
+          ( cd "$OUT_DIR" && zip -r9 ../DeviceSpoofLabs-Hooks-Zygisk.zip . )
+          echo "Module zip created at build/DeviceSpoofLabs-Hooks-Zygisk.zip"
+
+      - name: Upload module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeviceSpoofLabs-Hooks-Zygisk
+          path: build/DeviceSpoofLabs-Hooks-Zygisk.zip
+          if-no-files-found: error
+
+      - name: Upload standalone APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeviceSpoofLabs-APK
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

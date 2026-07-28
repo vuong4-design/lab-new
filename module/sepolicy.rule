@@ -1,0 +1,20 @@
+# DeviceSpoofLabs-Hooks SEPolicy rules
+# Required for the Zygisk companion to read the app's config files
+# and scope list from /data/data/com.devicespooflab.hooks/files/.
+#
+# On enforcing ROMs the companion (running as zygote/root context)
+# may be denied access to app_data_file unless explicitly allowed.
+
+# Allow zygote to search and read the module app's data directory.
+allow zygote app_data_file dir { search read open getattr }
+allow zygote app_data_file file { read open getattr }
+
+# Some ROMs label /data/data/<pkg>/files as app_data_file_type or
+# privapp_data_file; cover the common label.
+allow zygote privapp_data_file dir { search read open getattr }
+allow zygote privapp_data_file file { read open getattr }
+
+# Allow the companion to write updated config/scope back if needed
+# (e.g., live-update from the UI app while module is active).
+allow zygote app_data_file file { write create }
+allow zygote app_data_file dir { write add_name }

@@ -9,8 +9,10 @@ import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +45,12 @@ public class ConfigManager {
     private static final String[] CONFIG_PATHS = {
         "/data/data/com.devicespooflab.hooks/files/device_profile.conf",
     };
+
+    private static final Set<String> EMPTY_VALUE_KEYS = new HashSet<>(Arrays.asList(
+            "ro.boot.hardware.gltransport",
+            "ro.boot.qemu.avd_name",
+            "ro.boot.qemu.gltransport.name",
+            "ro.build.version.base_os"));
 
     // Scope list: one target package name per line. Stored separately from the
     // spoof profile so the companion can read it independently and cheaply at
@@ -237,6 +245,9 @@ public class ConfigManager {
         defaults.put("ro.build.device", "cheetah");
         defaults.put("ro.build.characteristics", "nosdcard");
         defaults.put("ro.build.flavor", "cheetah-user");
+        defaults.put("ro.build.host", "abfarm-release");
+        defaults.put("ro.build.user", "android-build");
+        defaults.put("ro.build.date.utc", "1749081600");
 
         defaults.put("ro.build.version.release", "16");
         defaults.put("ro.build.version.release_or_codename", "16");
@@ -244,6 +255,13 @@ public class ConfigManager {
         defaults.put("ro.build.version.sdk", "36");
         defaults.put("ro.build.version.codename", "REL");
         defaults.put("ro.build.version.security_patch", "2025-06-05");
+        defaults.put("ro.build.version.base_os", "");
+        defaults.put("ro.build.version.preview_sdk", "0");
+        defaults.put("ro.build.version.preview_sdk_fingerprint", "REL");
+        defaults.put("ro.build.version.min_supported_target_sdk", "26");
+        defaults.put("ro.build.version.device_initial_sdk_int", "33");
+        defaults.put("ro.product.first_api_level", "33");
+        defaults.put("ro.odm.build.media_performance_class", "0");
 
         defaults.put("ro.product.build.fingerprint", "google/cheetah/cheetah:16/BP4A.250605.009/12621605:user/release-keys");
         defaults.put("ro.product.build.id", "BP4A.250605.009");
@@ -303,6 +321,8 @@ public class ConfigManager {
         defaults.put("ro.boot.hardware", "cheetah");
         defaults.put("ro.boot.hardware.vulkan", "mali");
         defaults.put("ro.boot.hardware.gltransport", "");
+        defaults.put("ro.boot.hardware.sku", "cheetah");
+        defaults.put("ro.boot.product.hardware.sku", "cheetah");
         defaults.put("ro.boot.mode", "normal");
         defaults.put("ro.product.cpu.abi", "arm64-v8a");
         defaults.put("ro.product.cpu.abilist", "arm64-v8a,armeabi-v7a,armeabi");
@@ -347,14 +367,33 @@ public class ConfigManager {
         defaults.put("dalvik.vm.heapstartsize", "8m");
         defaults.put("dalvik.vm.heaptargetutilization", "0.75");
 
+        defaults.put("gsm.version.baseband", "g5300q-250605-250612-B-10123456");
         defaults.put("gsm.operator.alpha", "T-Mobile");
         defaults.put("gsm.operator.numeric", "310260");
+        defaults.put("gsm.operator.iso-country", "us");
         defaults.put("gsm.sim.operator.alpha", "T-Mobile");
         defaults.put("gsm.sim.operator.numeric", "310260");
         defaults.put("gsm.sim.operator.iso-country", "us");
+
+        // Off by default: without this flag only hardware identifiers are spoofed
+        // and SIM/subscription state follows the real device.
+        defaults.put("fake_sim.enabled", "0");
+        defaults.put("fake_sim.subscription_id", "1");
+        defaults.put("fake_sim.sim_slot", "0");
+        defaults.put("fake_sim.display_name", "T-Mobile");
+        defaults.put("fake_sim.phone_count", "2");
+        defaults.put("fake_sim.active_modem_count", "2");
+        defaults.put("fake_sim.supported_modem_count", "2");
+        defaults.put("fake_sim.network_type_voice", "13");
+        defaults.put("fake_sim.network_type_data", "20");
         // Empty = passthrough; MainActivity seeds a concrete TZ on first launch.
         defaults.put("persist.sys.timezone", "");
         defaults.put("persist.sys.usb.config", "none");
+
+        defaults.put("settings.adb_enabled", "0");
+        defaults.put("settings.development_settings_enabled", "0");
+        defaults.put("settings.device_provisioned", "1");
+        defaults.put("settings.stay_on_while_plugged_in", "0");
 
         defaults.put("webview.user_agent", "Mozilla/5.0 (Linux; Android 16; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36");
 
@@ -523,9 +562,16 @@ public class ConfigManager {
                 "build.id.prefix", "ro.build.version.incremental", "ro.build.type",
                 "ro.build.tags", "ro.build.description", "ro.build.product",
                 "ro.build.device", "ro.build.characteristics", "ro.build.flavor",
+                "ro.build.host", "ro.build.user", "ro.build.date.utc",
                 "ro.build.version.release", "ro.build.version.release_or_codename",
                 "ro.build.version.release_or_preview_display", "ro.build.version.sdk",
-                "ro.build.version.codename", "ro.build.version.security_patch");
+                "ro.build.version.codename", "ro.build.version.security_patch",
+                "ro.build.version.base_os", "ro.build.version.preview_sdk",
+                "ro.build.version.preview_sdk_fingerprint",
+                "ro.build.version.min_supported_target_sdk",
+                "ro.build.version.device_initial_sdk_int",
+                "ro.product.first_api_level",
+                "ro.odm.build.media_performance_class");
 
         appendConfigBlock(sb, defaults, emitted, "Partition build information",
                 "ro.product.build.fingerprint", "ro.product.build.id",
@@ -552,8 +598,13 @@ public class ConfigManager {
                 "sys.oem_unlock_allowed", "ro.boot.veritymode", "ro.crypto.state",
                 "ro.kernel.qemu", "ro.boot.qemu");
 
+        appendConfigBlock(sb, defaults, emitted, "Settings provider values (integer getInt surfaces)",
+                "settings.adb_enabled", "settings.development_settings_enabled",
+                "settings.device_provisioned", "settings.stay_on_while_plugged_in");
+
         appendConfigBlock(sb, defaults, emitted, "Hardware, CPU, memory, and display",
                 "ro.boot.hardware", "ro.boot.hardware.vulkan", "ro.boot.hardware.gltransport",
+                "ro.boot.hardware.sku", "ro.boot.product.hardware.sku",
                 "ro.boot.mode", "ro.product.cpu.abi", "ro.product.cpu.abilist",
                 "ro.product.cpu.abilist64", "ro.product.cpu.abilist32", "ro.arch",
                 "ro.sf.lcd_density", "ro.treble.enabled", "ro.hardware.vulkan",
@@ -585,9 +636,17 @@ public class ConfigManager {
                 "install.installer_package", "install.initiating_package");
 
         appendConfigBlock(sb, defaults, emitted, "Carrier and GSM",
-                "gsm.operator.alpha", "gsm.operator.numeric", "gsm.sim.operator.alpha",
-                "gsm.sim.operator.numeric", "gsm.sim.operator.iso-country",
+                "gsm.version.baseband", "gsm.operator.alpha", "gsm.operator.numeric",
+                "gsm.operator.iso-country",
+                "gsm.sim.operator.alpha", "gsm.sim.operator.numeric",
+                "gsm.sim.operator.iso-country",
                 "persist.sys.timezone", "persist.sys.usb.config");
+
+        appendConfigBlock(sb, defaults, emitted, "Fake SIM (opt-in)",
+                "fake_sim.enabled", "fake_sim.subscription_id", "fake_sim.sim_slot",
+                "fake_sim.display_name", "fake_sim.phone_count",
+                "fake_sim.active_modem_count", "fake_sim.supported_modem_count",
+                "fake_sim.network_type_voice", "fake_sim.network_type_data");
 
         appendConfigBlock(sb, defaults, emitted, "Behavior flags",
                 "hooks.hide_accounts", "hooks.hide_detection_packages",
@@ -661,6 +720,10 @@ public class ConfigManager {
             return defaultValue;
         }
         String value = getConfigValue(key);
+
+        if (EMPTY_VALUE_KEYS.contains(key)) {
+            return value == null ? defaultValue : value;
+        }
 
         if ("ro.serialno".equals(key) || "ro.boot.serialno".equals(key)) {
             String resolved = (value == null || value.isEmpty()) ? getSerial() : value;
@@ -850,7 +913,8 @@ public class ConfigManager {
         for (Map.Entry<String, String> e : props.entrySet()) {
             String key = e.getKey();
             String v = e.getValue();
-            if (v == null || v.isEmpty()) continue;
+            if (v == null) continue;
+            if (v.isEmpty() && !EMPTY_VALUE_KEYS.contains(key)) continue;
             if (key.startsWith("enabled.") || key.startsWith("identifier.")) continue;
             String identifier = IdentifierRegistry.identifierForKey(key);
             if (identifier != null && !isIdentifierEnabled(identifier)) continue;
@@ -1310,6 +1374,47 @@ public class ConfigManager {
         }
         String androidId = getAndroidId();
         return RandomGenerator.stableSeed(androidId == null ? "" : androidId);
+    }
+
+    public static int getSpoofedIntSetting(String key, int fallback) {
+        return propIntDef(key, fallback);
+    }
+
+    public static boolean isFakeSimEnabled() {
+        return propBoolDef("fake_sim.enabled", false);
+    }
+
+    public static int getFakeSimSubscriptionId() {
+        return propIntDef("fake_sim.subscription_id", 1);
+    }
+
+    public static int getFakeSimSlotIndex() {
+        return propIntDef("fake_sim.sim_slot", 0);
+    }
+
+    public static String getFakeSimDisplayName() {
+        return propStringDef("fake_sim.display_name",
+                propStringDef("gsm.sim.operator.alpha", "T-Mobile"));
+    }
+
+    public static int getFakeSimPhoneCount() {
+        return propIntDef("fake_sim.phone_count", 2);
+    }
+
+    public static int getFakeSimActiveModemCount() {
+        return propIntDef("fake_sim.active_modem_count", 2);
+    }
+
+    public static int getFakeSimSupportedModemCount() {
+        return propIntDef("fake_sim.supported_modem_count", 2);
+    }
+
+    public static int getFakeSimVoiceNetworkType() {
+        return propIntDef("fake_sim.network_type_voice", 13);
+    }
+
+    public static int getFakeSimDataNetworkType() {
+        return propIntDef("fake_sim.network_type_data", 20);
     }
 
     public static boolean isIdentifierEnabled(String id) {

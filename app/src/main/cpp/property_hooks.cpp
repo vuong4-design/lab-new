@@ -1,11 +1,10 @@
 #include "ds_state.h"
 
-#include <sys/sysmacros.h>
 #include <sys/system_properties.h>
 #include <dlfcn.h>
+#include <atomic>
 #include <cstring>
 #include <cstdio>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -37,6 +36,7 @@ std::mutex g_synth_mutex;
 std::vector<std::unique_ptr<SyntheticPi>> g_synth_storage;
 std::unordered_map<const prop_info*, SyntheticPi*> g_synth_index;
 std::unordered_map<std::string, const prop_info*> g_synth_by_name;
+std::atomic<bool> g_synthetic_pi_allowed{false};
 
 bool IsSynthetic(const prop_info* pi, std::string& nameOut) {
     if (pi == nullptr) return false;
@@ -81,7 +81,7 @@ int my_sp_get(const char* name, char* value) {
 }
 
 const prop_info* my_sp_find(const char* name) {
-    if (name != nullptr) {
+    if (name != nullptr && g_synthetic_pi_allowed.load()) {
         std::string spoofed;
         if (LookupProperty(name, spoofed)) {
             return MakeSynthetic(name);
@@ -178,53 +178,6 @@ void my_sp_read_callback(const prop_info* pi,
     }
 }
 
-struct LibLocation {
-    bool found;
-    dev_t dev;
-    ino_t inode;
-    std::string path;
-};
-
-LibLocation FindLibrary(const char* suffix) {
-    LibLocation result{false, 0, 0, {}};
-    std::ifstream maps("/proc/self/maps");
-    if (!maps.is_open()) return result;
-
-    std::string suf = suffix;
-    std::string line;
-    while (std::getline(maps, line)) {
-        uintptr_t start = 0;
-        uintptr_t end = 0;
-        unsigned int devMajor = 0;
-        unsigned int devMinor = 0;
-        unsigned long inode = 0;
-        char perms[5] = {};
-        unsigned long offset = 0;
-        char pathBuf[512] = {};
-
-        int parsed = sscanf(line.c_str(),
-                            "%lx-%lx %4s %lx %x:%x %lu %511[^\n]",
-                            &start, &end, perms, &offset, &devMajor,
-                            &devMinor, &inode, pathBuf);
-        if (parsed < 8) continue;
-
-        std::string path(pathBuf);
-        auto first = path.find_first_not_of(' ');
-        if (first != std::string::npos) path = path.substr(first);
-        if (path.size() < suf.size()) continue;
-
-        auto pos = path.rfind(suf);
-        if (pos != std::string::npos && pos + suf.size() == path.size()) {
-            result.found = true;
-            result.dev = makedev(devMajor, devMinor);
-            result.inode = static_cast<ino_t>(inode);
-            result.path = path;
-            return result;
-        }
-    }
-    return result;
-}
-
 }  // namespace
 
 void InstallPropertyHooks(bool installOptionalHooks) {
@@ -245,52 +198,41 @@ void InstallPropertyHooks(bool installPropertyGet,
                           bool installPropertyReadCallback,
                           bool installSystemHookGroup,
                           bool installDlopenHookGroup) {
-    LibLocation libc = FindLibrary("/libc.so");
-    if (!libc.found) {
-        DS_LOGE("InstallPropertyHooks: libc.so not found in /proc/self/maps");
-        return;
-    }
-    DS_LOGW("audit:Located libc at %s (dev=%lu inode=%lu)", libc.path.c_str(),
-            (unsigned long)libc.dev, (unsigned long)libc.inode);
-
-    bool ok_get = false;
     if (installPropertyGet) {
-        ok_get = ZygiskPltHookRegister(
-            libc.dev, libc.inode, "__system_property_get",
-            reinterpret_cast<void*>(&my_sp_get),
-            reinterpret_cast<void**>(&orig_sp_get));
+        RegisterNativeHookGroup(
+            "__system_property_get", reinterpret_cast<void*>(&my_sp_get),
+            reinterpret_cast<void**>(&orig_sp_get), "/libc.so");
     }
-    bool ok_find = false;
     if (installPropertyFind) {
-        ok_find = ZygiskPltHookRegister(
-            libc.dev, libc.inode, "__system_property_find",
-            reinterpret_cast<void*>(&my_sp_find),
-            reinterpret_cast<void**>(&orig_sp_find));
+        RegisterNativeHookGroup(
+            "__system_property_find", reinterpret_cast<void*>(&my_sp_find),
+            reinterpret_cast<void**>(&orig_sp_find), "/libc.so");
     }
-    bool has_read = dlsym(RTLD_DEFAULT, "__system_property_read") != nullptr;
-    // __system_property_read is not present as a PLT relocation on many modern
-    // Android processes. Registering it can make the whole Zygisk commit fail,
-    // so rely on get/find/read_callback for the core property path.
-    bool ok_read = false;
-    bool ok_cb = false;
     if (installPropertyReadCallback) {
-        ok_cb = ZygiskPltHookRegister(
-            libc.dev, libc.inode, "__system_property_read_callback",
+        RegisterNativeHookGroup(
+            "__system_property_read_callback",
             reinterpret_cast<void*>(&my_sp_read_callback),
-            reinterpret_cast<void**>(&orig_sp_read_callback));
+            reinterpret_cast<void**>(&orig_sp_read_callback), "/libc.so");
     }
 
-    DS_LOGW("audit:RegisterHook(prop): req_get=%d req_find=%d req_cb=%d get=%d find=%d read=%d read_exported=%d read_callback=%d",
-            installPropertyGet, installPropertyFind,
-            installPropertyReadCallback, ok_get, ok_find, ok_read,
-            has_read, ok_cb);
+    bool has_read = dlsym(RTLD_DEFAULT, "__system_property_read") != nullptr;
+    if (has_read) {
+        RegisterNativeHookGroup(
+            "__system_property_read", reinterpret_cast<void*>(&my_sp_read),
+            reinterpret_cast<void**>(&orig_sp_read), "/libc.so");
+    }
 
+    RegisterNativeHooksForPendingModules();
     bool coreCommitted = ZygiskPltHookCommit();
-    DS_LOGW("audit:CommitHook(core)=%d spoofed_keys=%zu orig_get=%p orig_find=%p "
-            "orig_read=%p orig_cb=%p",
-            coreCommitted, (size_t)g_props.size(), (void*)orig_sp_get,
-            (void*)orig_sp_find, (void*)orig_sp_read,
-            (void*)orig_sp_read_callback);
+    g_synthetic_pi_allowed.store(installPropertyFind && has_read
+                                 && orig_sp_read != nullptr);
+    DS_LOGW("audit:RegisterHook(prop): req_get=%d req_find=%d req_cb=%d "
+            "read_exported=%d commit=%d spoofed_keys=%zu orig_get=%p "
+            "orig_find=%p orig_read=%p orig_cb=%p",
+            installPropertyGet, installPropertyFind,
+            installPropertyReadCallback, has_read, coreCommitted,
+            (size_t)g_props.size(), (void*)orig_sp_get, (void*)orig_sp_find,
+            (void*)orig_sp_read, (void*)orig_sp_read_callback);
 
     if (!installSystemHookGroup && !installDlopenHookGroup) {
         DS_LOGW("audit:native optional hooks skipped; property core only");
@@ -298,7 +240,8 @@ void InstallPropertyHooks(bool installPropertyGet,
     }
 
     if (installSystemHookGroup) {
-        InstallSystemHooks(libc.dev, libc.inode);
+        InstallSystemHooks();
+        InstallGpuHooks();
         // /proc + /sys read guard rides in the same commit batch below.
         InstallPathGuardHooks();
     } else {
@@ -306,18 +249,12 @@ void InstallPropertyHooks(bool installPropertyGet,
     }
 
     if (installDlopenHookGroup) {
-        LibLocation libdl = FindLibrary("/libdl.so");
-        if (libdl.found) {
-            DS_LOGW("audit:Located libdl at %s (dev=%lu inode=%lu)", libdl.path.c_str(),
-                    (unsigned long)libdl.dev, (unsigned long)libdl.inode);
-            InstallDlopenHooks(libdl.dev, libdl.inode);
-        } else {
-            DS_LOGW("libdl.so not found - dlopen re-hook skipped");
-        }
+        InstallDlopenHooks();
     } else {
         DS_LOGW("audit:dlopen hooks skipped by native mode");
     }
 
+    RegisterNativeHooksForPendingModules();
     bool optionalCommitted = ZygiskPltHookCommit();
     DS_LOGW("audit:CommitHook(optional)=%d spoofed_keys=%zu system=%d dlopen=%d",
             optionalCommitted, (size_t)g_props.size(),

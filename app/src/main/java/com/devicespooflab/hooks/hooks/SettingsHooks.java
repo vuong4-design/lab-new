@@ -21,6 +21,11 @@ public class SettingsHooks {
     private static final String BLUETOOTH_NAME = "bluetooth_name";
     private static final String DEVICE_NAME = "device_name";
 
+    private static final String ADB_ENABLED = "adb_enabled";
+    private static final String DEVELOPMENT_SETTINGS_ENABLED = "development_settings_enabled";
+    private static final String DEVICE_PROVISIONED = "device_provisioned";
+    private static final String STAY_ON_WHILE_PLUGGED_IN = "stay_on_while_plugged_in";
+
     public static void hook(LoadPackageParam lpparam) {
         hookClass(lpparam, "android.provider.Settings$Secure",
                 SPOOF_ANDROID_ID | SPOOF_GSF_ID | SPOOF_BLUETOOTH_ADDRESS | SPOOF_DEVICE_NAMES);
@@ -28,6 +33,48 @@ public class SettingsHooks {
                 SPOOF_BLUETOOTH_ADDRESS | SPOOF_DEVICE_NAMES);
         hookClass(lpparam, "android.provider.Settings$Global",
                 SPOOF_BLUETOOTH_ADDRESS | SPOOF_DEVICE_NAMES);
+        hookIntegerClass(lpparam, "android.provider.Settings$Global");
+    }
+
+    private static void hookIntegerClass(LoadPackageParam lpparam, String className) {
+        Class<?> clazz = XposedHelpers.findClassIfExists(className, lpparam.classLoader);
+        if (clazz == null) return;
+
+        XC_MethodHook hook = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                String name = param.args.length > 1 ? (String) param.args[1] : null;
+                Integer value = spoofedInteger(name);
+                if (value != null) param.setResult(value);
+            }
+        };
+
+        try {
+            XposedHelpers.findAndHookMethod(clazz, "getInt",
+                    ContentResolver.class, String.class, int.class, hook);
+        } catch (NoSuchMethodError ignored) {
+        }
+        try {
+            XposedHelpers.findAndHookMethod(clazz, "getIntForUser",
+                    ContentResolver.class, String.class, int.class, int.class, hook);
+        } catch (NoSuchMethodError ignored) {
+        }
+    }
+
+    private static Integer spoofedInteger(String name) {
+        if (ADB_ENABLED.equals(name)) {
+            return ConfigManager.getSpoofedIntSetting("settings.adb_enabled", 0);
+        }
+        if (DEVELOPMENT_SETTINGS_ENABLED.equals(name)) {
+            return ConfigManager.getSpoofedIntSetting("settings.development_settings_enabled", 0);
+        }
+        if (DEVICE_PROVISIONED.equals(name)) {
+            return ConfigManager.getSpoofedIntSetting("settings.device_provisioned", 1);
+        }
+        if (STAY_ON_WHILE_PLUGGED_IN.equals(name)) {
+            return ConfigManager.getSpoofedIntSetting("settings.stay_on_while_plugged_in", 0);
+        }
+        return null;
     }
 
     private static void hookClass(LoadPackageParam lpparam,
@@ -78,6 +125,12 @@ public class SettingsHooks {
 
     private static void applySpoof(XC_MethodHook.MethodHookParam param, String name, int spoofFlags) {
         if (name == null) return;
+
+        Integer setting = spoofedInteger(name);
+        if (setting != null) {
+            param.setResult(String.valueOf(setting));
+            return;
+        }
 
         if ((spoofFlags & SPOOF_ANDROID_ID) != 0 && ANDROID_ID.equals(name)) {
             String v = ConfigManager.getAndroidId();

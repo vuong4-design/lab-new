@@ -34,12 +34,14 @@ add_library(ds_native SHARED
     native_hooks.cpp
     property_hooks.cpp
     system_hooks.cpp
+    gpu_hooks.cpp
     dlopen_hook.cpp
     zygisk_entry.cpp
     zygisk_api.cpp
     java_loader.cpp
     companion.cpp
     path_guard.cpp
+    module_registry.cpp
 )
 
 target_link_libraries(ds_native

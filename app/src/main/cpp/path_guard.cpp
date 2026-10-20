@@ -4,16 +4,15 @@
 #include <fcntl.h>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cerrno>
 #include <string>
 #include <vector>
-#include <fstream>
 #include <link.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
-#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -26,8 +25,9 @@
 //     (/proc/self/maps, /proc/self/smaps, /proc/self/task/<tid>/maps),
 //   * file descriptors that resolve to the module directory
 //     (readlink of /proc/self/fd/<n>),
-//   * hardware facts (RAM / MAC) that contradict the Java-level spoof
-//     (/proc/meminfo, /sys/class/net/<if>/address).
+//   * hardware facts (RAM / CPU / kernel / MAC) that contradict the
+//     Java-level spoof (/proc/meminfo, /proc/cpuinfo, /proc/version,
+//     /proc/sys/kernel/*, mount tables, /sys/class/net/<if>/address).
 //
 // This guard PLT-hooks the file entry points (open/openat/open64/fopen/
 // fopen64/readlink/readlinkat) in *every* currently-loaded executable module.
@@ -182,6 +182,32 @@ std::string FilterMaps(const std::string& raw) {
     return out;
 }
 
+bool IsMountLeak(const std::string& line) {
+    return IsSensitive(line)
+        || Contains(line, "magisk")
+        || Contains(line, "zygisk")
+        || Contains(line, "kernelsu")
+        || Contains(line, "apatch")
+        || Contains(line, "lsposed");
+}
+
+std::string FilterMountTable(const std::string& raw) {
+    std::string out;
+    size_t i = 0;
+    while (i < raw.size()) {
+        size_t nl = raw.find('\n', i);
+        bool hasNl = (nl != std::string::npos);
+        if (!hasNl) nl = raw.size();
+        std::string line = raw.substr(i, nl - i);
+        if (!IsMountLeak(line)) {
+            out += line;
+            if (hasNl) out += '\n';
+        }
+        i = nl + 1;
+    }
+    return out;
+}
+
 // Rewrite MemTotal / MemAvailable when the profile supplies overrides; returns
 // empty string when there is nothing to override (=> fall through to real file).
 std::string FilterMeminfo(const std::string& raw) {
@@ -214,6 +240,181 @@ std::string FilterMeminfo(const std::string& raw) {
     return out;
 }
 
+std::string Trim(const std::string& value) {
+    size_t first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return std::string();
+    size_t last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+std::vector<std::string> SplitCsv(const std::string& value) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    for (;;) {
+        size_t comma = value.find(',', start);
+        if (comma == std::string::npos) comma = value.size();
+        out.push_back(Trim(value.substr(start, comma - start)));
+        if (comma == value.size()) break;
+        start = comma + 1;
+    }
+    return out;
+}
+
+std::string CsvAt(const std::vector<std::string>& values, size_t index,
+                  const char* fallback) {
+    if (index < values.size() && !values[index].empty()) return values[index];
+    for (const auto& value : values) {
+        if (!value.empty()) return value;
+    }
+    return fallback != nullptr ? fallback : "";
+}
+
+int ParseCoreCount(const std::string& raw) {
+    if (raw.empty()) return 0;
+    char* end = nullptr;
+    long value = std::strtol(raw.c_str(), &end, 10);
+    if (end == raw.c_str() || value <= 0) return 0;
+    if (value > 256) value = 256;
+    return static_cast<int>(value);
+}
+
+std::string FilterCpuinfo() {
+    std::string coresRaw, bogo, features, implementer, architecture;
+    std::string variantsRaw, partsRaw, revisionsRaw, hardware, revision;
+    LookupProperty("cpuinfo.cores", coresRaw);
+    LookupProperty("cpuinfo.bogomips", bogo);
+    LookupProperty("cpuinfo.features", features);
+    LookupProperty("cpuinfo.implementer", implementer);
+    LookupProperty("cpuinfo.architecture", architecture);
+    LookupProperty("cpuinfo.variants", variantsRaw);
+    LookupProperty("cpuinfo.parts", partsRaw);
+    LookupProperty("cpuinfo.revisions", revisionsRaw);
+    LookupProperty("cpuinfo.hardware", hardware);
+    LookupProperty("cpuinfo.revision", revision);
+    if (hardware.empty()) {
+        std::string roHardware;
+        if (LookupProperty("ro.hardware", roHardware)) hardware = roHardware;
+    }
+
+    int cores = ParseCoreCount(coresRaw);
+    if (cores == 0) cores = 8;
+    if (bogo.empty()) bogo = "38.40";
+    if (features.empty()) features = "fp asimd evtstrm aes pmull sha1 sha2 crc32";
+    if (implementer.empty()) implementer = "0x41";
+    if (architecture.empty()) architecture = "8";
+    if (hardware.empty()) hardware = "Cheetah";
+    if (revision.empty()) revision = "0001";
+
+    std::vector<std::string> variants = SplitCsv(variantsRaw);
+    std::vector<std::string> parts = SplitCsv(partsRaw);
+    std::vector<std::string> revisions = SplitCsv(revisionsRaw);
+
+    std::string out;
+    for (int i = 0; i < cores; ++i) {
+        out += "processor\t: " + std::to_string(i) + "\n";
+        out += "BogoMIPS\t: " + bogo + "\n";
+        out += "Features\t: " + features + "\n";
+        out += "CPU implementer\t: " + implementer + "\n";
+        out += "CPU architecture: " + architecture + "\n";
+        out += "CPU variant\t: " + CsvAt(variants, static_cast<size_t>(i), "0x1") + "\n";
+        out += "CPU part\t: " + CsvAt(parts, static_cast<size_t>(i), "0xd05") + "\n";
+        out += "CPU revision\t: " + CsvAt(revisions, static_cast<size_t>(i), "0") + "\n";
+        out += "\n";
+    }
+    out += "Hardware\t: " + hardware + "\n";
+    out += "Revision\t: " + revision + "\n";
+    out += "Serial\t\t: 0000000000000000\n";
+    return out;
+}
+
+std::string FilterProcStat(const std::string& raw) {
+    int cores = 0;
+    std::string coresRaw;
+    if (LookupProperty("cpuinfo.cores", coresRaw)
+            || LookupProperty("hardware.cpu.cores", coresRaw)) {
+        cores = ParseCoreCount(coresRaw);
+    }
+    if (cores == 0) cores = 8;
+
+    std::string aggregate;
+    std::vector<std::string> perCore(static_cast<size_t>(cores));
+    std::string rest;
+    size_t i = 0;
+    while (i < raw.size()) {
+        size_t nl = raw.find('\n', i);
+        bool hasNl = (nl != std::string::npos);
+        if (!hasNl) nl = raw.size();
+        std::string line = raw.substr(i, nl - i);
+        if (line.rfind("cpu ", 0) == 0) {
+            aggregate = line;
+        } else if (line.rfind("cpu", 0) == 0 && line.size() > 3
+                && line[3] >= '0' && line[3] <= '9') {
+            size_t index = static_cast<size_t>(std::strtoul(
+                    line.c_str() + 3, nullptr, 10));
+            if (index < perCore.size()) perCore[index] = line;
+        } else {
+            rest += line;
+            if (hasNl) rest += '\n';
+        }
+        i = nl + 1;
+    }
+
+    if (aggregate.empty()) aggregate = "cpu  0 0 0 0 0 0 0 0 0 0";
+    std::string out = aggregate + "\n";
+    for (int core = 0; core < cores; ++core) {
+        if (!perCore[static_cast<size_t>(core)].empty()) {
+            out += perCore[static_cast<size_t>(core)] + "\n";
+        } else {
+            out += "cpu" + std::to_string(core) + " 0 0 0 0 0 0 0 0 0 0\n";
+        }
+    }
+    out += rest;
+    return out;
+}
+
+bool LooksVirtual(const std::string& raw) {
+    return Contains(raw, "qemu") || Contains(raw, "goldfish")
+            || Contains(raw, "ranchu") || Contains(raw, "emulator")
+            || Contains(raw, "kvm");
+}
+
+std::string FilterCmdline(const std::string& raw) {
+    if (!LooksVirtual(raw)) return std::string();
+    return "androidboot.hardware=cheetah androidboot.hardware.sku=cheetah "
+           "androidboot.verifiedbootstate=green androidboot.flash.locked=1 "
+           "androidboot.vbmeta.device_state=locked androidboot.warranty_bit=0\n";
+}
+
+std::string FilterBootconfig(const std::string& raw) {
+    if (!LooksVirtual(raw)) return std::string();
+    return "androidboot.hardware = \"cheetah\"\n"
+           "androidboot.hardware.sku = \"cheetah\"\n"
+           "androidboot.verifiedbootstate = \"green\"\n"
+           "androidboot.flash.locked = \"1\"\n"
+           "androidboot.vbmeta.device_state = \"locked\"\n"
+           "androidboot.warranty_bit = \"0\"\n";
+}
+
+std::string FilterProcVersion() {
+    std::string release, version, hostname;
+    LookupProperty("kernel.osrelease", release);
+    LookupProperty("kernel.version", version);
+    LookupProperty("kernel.hostname", hostname);
+    if (release.empty() && version.empty()) return std::string();
+    if (release.empty()) release = "5.10.157-android13";
+    if (version.empty()) version = "#1 SMP PREEMPT";
+    if (hostname.empty()) hostname = "localhost";
+    return "Linux version " + release + " (android-build@" + hostname + ") "
+            + "(Android clang version 14.0.7) " + version + "\n";
+}
+
+std::string FilterKernelProperty(const char* key, bool newline) {
+    std::string value;
+    if (!LookupProperty(key, value) || value.empty()) return std::string();
+    if (newline) value += "\n";
+    return value;
+}
+
 const char* kFdTag = "dalvik-jit-code-cache";
 
 // Returns >=0 fd with sanitised content, or -1 to fall through to the original.
@@ -231,6 +432,66 @@ int SanitisedFdFor(const char* path) {
         std::string raw = ReadWholeFileRaw(path);
         if (raw.empty()) return -1;
         std::string filtered = FilterMeminfo(raw);
+        if (filtered.empty()) return -1;
+        return MakeContentFd(filtered, kFdTag);
+    }
+    if (p == "/proc/self/mountinfo" || p == "/proc/mounts" ||
+        p == "/proc/self/mounts") {
+        std::string raw = ReadWholeFileRaw(path);
+        if (raw.empty()) return -1;
+        return MakeContentFd(FilterMountTable(raw), kFdTag);
+    }
+    if (p == "/proc/cpuinfo") {
+        std::string filtered = FilterCpuinfo();
+        if (filtered.empty()) return -1;
+        return MakeContentFd(filtered, kFdTag);
+    }
+    if (p == "/proc/version") {
+        std::string filtered = FilterProcVersion();
+        if (filtered.empty()) return -1;
+        return MakeContentFd(filtered, kFdTag);
+    }
+    if (p == "/proc/stat") {
+        std::string raw = ReadWholeFileRaw(path);
+        if (raw.empty()) return -1;
+        return MakeContentFd(FilterProcStat(raw), kFdTag);
+    }
+    if (p == "/proc/cmdline") {
+        std::string raw = ReadWholeFileRaw(path);
+        if (raw.empty()) return -1;
+        std::string filtered = FilterCmdline(raw);
+        if (filtered.empty()) return -1;
+        return MakeContentFd(filtered, kFdTag);
+    }
+    if (p == "/proc/bootconfig") {
+        std::string raw = ReadWholeFileRaw(path);
+        if (raw.empty()) return -1;
+        std::string filtered = FilterBootconfig(raw);
+        if (filtered.empty()) return -1;
+        return MakeContentFd(filtered, kFdTag);
+    }
+    if (p == "/proc/device-tree/model") {
+        std::string raw = ReadWholeFileRaw(path);
+        if (!LooksVirtual(raw)) return -1;
+        return MakeContentFd("google,cheetah", kFdTag);
+    }
+    if (p == "/proc/device-tree/compatible") {
+        std::string raw = ReadWholeFileRaw(path);
+        if (!LooksVirtual(raw)) return -1;
+        return MakeContentFd("google,cheetah", kFdTag);
+    }
+    if (p == "/proc/sys/kernel/osrelease") {
+        std::string filtered = FilterKernelProperty("kernel.osrelease", true);
+        if (filtered.empty()) return -1;
+        return MakeContentFd(filtered, kFdTag);
+    }
+    if (p == "/proc/sys/kernel/version") {
+        std::string filtered = FilterKernelProperty("kernel.version", true);
+        if (filtered.empty()) return -1;
+        return MakeContentFd(filtered, kFdTag);
+    }
+    if (p == "/proc/sys/kernel/hostname") {
+        std::string filtered = FilterKernelProperty("kernel.hostname", true);
         if (filtered.empty()) return -1;
         return MakeContentFd(filtered, kFdTag);
     }
@@ -363,36 +624,6 @@ void RegisterOnModule(dev_t dev, ino_t inode) {
         ZygiskPltHookRegister(dev, inode, "dl_iterate_phdr", reinterpret_cast<void*>(&my_dl_iterate_phdr), reinterpret_cast<void**>(&orig_dl_iterate_phdr));
 }
 
-// Walk /proc/self/maps and register the guard on every distinct (dev,inode)
-// that backs an executable, file-backed mapping (i.e. every loaded module),
-// so that app-direct calls to open()/readlink() are intercepted too.
-void ForEachLoadedModule() {
-    std::ifstream maps("/proc/self/maps");
-    if (!maps.is_open()) return;
-    std::string line;
-    std::vector<std::pair<unsigned long, unsigned long>> seen;
-    while (std::getline(maps, line)) {
-        unsigned long start = 0, end = 0, off = 0;
-        unsigned int maj = 0, min = 0;
-        unsigned long ino = 0;
-        char perms[5] = {};
-        char pathBuf[512] = {};
-        int parsed = sscanf(line.c_str(),
-                            "%lx-%lx %4s %lx %x:%x %lu %511[^\n]",
-                            &start, &end, perms, &off, &maj, &min, &ino, pathBuf);
-        if (parsed < 8) continue;
-        if (perms[2] != 'x') continue;   // executable segments only
-        if (ino == 0) continue;          // skip anonymous mappings
-        dev_t dev = makedev(maj, min);
-        unsigned long devKey = static_cast<unsigned long>(dev);
-        bool dup = false;
-        for (auto& s : seen) if (s.first == devKey && s.second == ino) { dup = true; break; }
-        if (dup) continue;
-        seen.emplace_back(devKey, ino);
-        RegisterOnModule(dev, static_cast<ino_t>(ino));
-    }
-}
-
 // Identify system_server via a RAW read of /proc/self/cmdline (never through
 // the libc we are about to hook). Intercepting open()/openat() inside
 // system_server is both unnecessary (a detector inspects its *own* app
@@ -411,6 +642,10 @@ bool IsSystemServer() {
 
 }  // namespace
 
+void RegisterPathGuardOnModule(dev_t dev, ino_t inode) {
+    RegisterOnModule(dev, inode);
+}
+
 void InstallPathGuardHooks() {
     // OPT-IN ONLY. This guard PLT-hooks the hot open()/openat()/fopen() family
     // across every loaded module; a fault anywhere on that path brings down the
@@ -428,8 +663,8 @@ void InstallPathGuardHooks() {
     }
     // Registers hooks only; the shared ZygiskPltHookCommit() in
     // InstallPropertyHooks() commits this batch together with the others.
-    ForEachLoadedModule();
-    DS_LOGW("audit:path guard registered (app process only; maps/smaps/meminfo/sys-net/readlink)");
+    RegisterNativeModuleCallback(&RegisterPathGuardOnModule);
+    DS_LOGW("audit:path guard registered (app process only; maps/smaps/meminfo/cpuinfo/version/mounts/sys-net/readlink)");
 }
 
 }  // namespace ds

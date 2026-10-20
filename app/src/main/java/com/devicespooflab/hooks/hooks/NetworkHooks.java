@@ -111,6 +111,16 @@ public class NetworkHooks {
                     });
         } catch (Throwable t) { logFail("BluetoothAdapter.getName", t); }
 
+        try {
+            XposedHelpers.findAndHookMethod(ba, "getBondedDevices",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult(Collections.emptySet());
+                        }
+                    });
+        } catch (Throwable t) { logFail("BluetoothAdapter.getBondedDevices", t); }
+
         // Settings.Secure.bluetooth_address path — settings hook handles strings,
         // but BluetoothAdapter.getAddress hides the well-known reflection too.
     }
@@ -162,7 +172,8 @@ public class NetworkHooks {
                                 String n = (ni == null) ? "" : ni.getName();
                                 if (n == null) continue;
                                 if (n.startsWith("rmnet") || n.startsWith("ccmni")
-                                        || n.startsWith("p2p") || n.startsWith("dummy")) {
+                                        || n.startsWith("p2p") || n.startsWith("dummy")
+                                        || n.startsWith("eth")) {
                                     continue;
                                 }
                                 kept.add(ni);

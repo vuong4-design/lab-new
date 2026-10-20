@@ -97,6 +97,9 @@ public class PackageInfoHooks {
         if (plan.lists) {
             hookInstalledLists(appPm, lpparam, plan);
         }
+        if (plan.packageUid) {
+            hookUidQueries(appPm, lpparam, plan);
+        }
     }
 
     private static void installIpmProxy(LoadPackageParam lpparam, PackageInfoPlan plan) {
@@ -261,6 +264,9 @@ public class PackageInfoHooks {
                 return hiddenResult(method);
             }
             Object result = invokeOriginal(method, args);
+            if (plan.lists && isInstalledListMethod(methodName)) {
+                return filterInstalledResult(lpparam, result);
+            }
             if (hide && plan.hideAfter()) {
                 trace(plan, "ipm-hide-after", methodName, packageName, true);
                 return hiddenResult(method);
@@ -269,13 +275,19 @@ public class PackageInfoHooks {
         }
 
         private boolean isSupportedLookup(String methodName) {
-            if (plan.getPackageInfo && "getPackageInfo".equals(methodName)) {
+            if (plan.getPackageInfo
+                    && ("getPackageInfo".equals(methodName)
+                    || "getPackageInfoAsUser".equals(methodName))) {
                 return true;
             }
-            if (plan.applicationInfo && "getApplicationInfo".equals(methodName)) {
+            if (plan.applicationInfo
+                    && ("getApplicationInfo".equals(methodName)
+                    || "getApplicationInfoAsUser".equals(methodName))) {
                 return true;
             }
-            return plan.packageUid && "getPackageUid".equals(methodName);
+            return plan.packageUid
+                    && ("getPackageUid".equals(methodName)
+                    || "getPackageUidAsUser".equals(methodName));
         }
 
         private Object invokeOriginal(Method method, Object[] args) throws Throwable {
@@ -359,6 +371,26 @@ public class PackageInfoHooks {
                         String.class, flags, hook);
             }
         } catch (Throwable t) { /* Android 13+ overload may not exist here */ }
+
+        String asUserMethod = methodName + "AsUser";
+        try {
+            XposedHelpers.findAndHookMethod(appPm, asUserMethod,
+                    String.class, int.class, int.class, hook);
+        } catch (Throwable t) { /* optional AsUser overload */ }
+
+        try {
+            XposedHelpers.findAndHookMethod(appPm, asUserMethod,
+                    String.class, int.class, hook);
+        } catch (Throwable t) { /* optional AsUser overload */ }
+
+        try {
+            Class<?> flags = XposedHelpers.findClassIfExists(
+                    flagsClassName, lpparam.classLoader);
+            if (flags != null) {
+                XposedHelpers.findAndHookMethod(appPm, asUserMethod,
+                        String.class, flags, int.class, hook);
+            }
+        } catch (Throwable t) { /* optional AsUser flags overload */ }
     }
 
     private static void hookInstalledLists(Class<?> appPm, LoadPackageParam lpparam,
@@ -388,11 +420,23 @@ public class PackageInfoHooks {
         } catch (Throwable t) { logFail("getInstalledApplications(int)", t); }
 
         try {
+            XposedHelpers.findAndHookMethod(appPm, "getInstalledPackagesAsUser",
+                    int.class, int.class, listFilter);
+        } catch (Throwable t) { /* optional AsUser overload */ }
+
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getInstalledApplicationsAsUser",
+                    int.class, int.class, listFilter);
+        } catch (Throwable t) { /* optional AsUser overload */ }
+
+        try {
             Class<?> packageInfoFlags = XposedHelpers.findClassIfExists(
                     "android.content.pm.PackageManager$PackageInfoFlags", lpparam.classLoader);
             if (packageInfoFlags != null) {
                 XposedHelpers.findAndHookMethod(appPm, "getInstalledPackages",
                         packageInfoFlags, listFilter);
+                XposedHelpers.findAndHookMethod(appPm, "getInstalledPackagesAsUser",
+                        packageInfoFlags, int.class, listFilter);
             }
         } catch (Throwable t) { /* Android 13+ overload may not exist here */ }
 
@@ -402,8 +446,69 @@ public class PackageInfoHooks {
             if (applicationInfoFlags != null) {
                 XposedHelpers.findAndHookMethod(appPm, "getInstalledApplications",
                         applicationInfoFlags, listFilter);
+                XposedHelpers.findAndHookMethod(appPm, "getInstalledApplicationsAsUser",
+                        applicationInfoFlags, int.class, listFilter);
             }
         } catch (Throwable t) { /* Android 13+ overload may not exist here */ }
+    }
+
+    private static void hookUidQueries(Class<?> appPm, LoadPackageParam lpparam,
+                                       PackageInfoPlan plan) {
+        XC_MethodHook gidsHook = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                String packageName = firstStringArg(param);
+                if (shouldHidePackage(lpparam, packageName)) {
+                    trace(plan, "uid-hide", "getPackageGids", packageName, true);
+                    param.setThrowable(new PackageManager.NameNotFoundException(packageName));
+                }
+            }
+        };
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getPackageGids",
+                    String.class, int.class, gidsHook);
+        } catch (Throwable t) { /* optional overload */ }
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getPackageGids",
+                    String.class, int.class, int.class, gidsHook);
+        } catch (Throwable t) { /* optional AsUser overload */ }
+
+        XC_MethodHook nameHook = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                Object result = param.getResult();
+                if (result instanceof String[]) {
+                    String[] filtered = filterUidNames(lpparam, (String[]) result);
+                    if (filtered != result) param.setResult(filtered);
+                } else if (result instanceof String
+                        && shouldHidePackage(lpparam, (String) result)) {
+                    param.setResult(null);
+                }
+            }
+        };
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getPackagesForUid",
+                    int.class, nameHook);
+        } catch (Throwable t) { /* optional overload */ }
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getNamesForUids",
+                    int[].class, nameHook);
+        } catch (Throwable t) { /* optional overload */ }
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getNameForUid",
+                    int.class, nameHook);
+        } catch (Throwable t) { /* optional overload */ }
+    }
+
+    private static String[] filterUidNames(LoadPackageParam lpparam, String[] original) {
+        ArrayList<String> filtered = new ArrayList<>(original.length);
+        for (String packageName : original) {
+            if (!shouldHidePackage(lpparam, packageName)) {
+                filtered.add(packageName);
+            }
+        }
+        if (filtered.size() == original.length) return original;
+        return filtered.toArray(new String[0]);
     }
 
     private static List<Object> filterPackageList(LoadPackageParam lpparam,
@@ -416,6 +521,33 @@ public class PackageInfoHooks {
             }
         }
         return filtered;
+    }
+
+    private static Object filterInstalledResult(LoadPackageParam lpparam, Object result) {
+        if (result instanceof List<?>) {
+            return filterPackageList(lpparam, (List<?>) result);
+        }
+        if (result == null) return null;
+        try {
+            Method getList = result.getClass().getMethod("getList");
+            Object listObject = getList.invoke(result);
+            if (!(listObject instanceof List<?>)) return result;
+            List<?> original = (List<?>) listObject;
+            List<Object> filtered = filterPackageList(lpparam, original);
+            if (filtered.size() == original.size()) return result;
+            Method setList = result.getClass().getMethod("setList", List.class);
+            setList.invoke(result, filtered);
+            return result;
+        } catch (Throwable ignored) {
+            return result;
+        }
+    }
+
+    private static boolean isInstalledListMethod(String methodName) {
+        return "getInstalledPackages".equals(methodName)
+                || "getInstalledApplications".equals(methodName)
+                || "getInstalledPackagesAsUser".equals(methodName)
+                || "getInstalledApplicationsAsUser".equals(methodName);
     }
 
     private static String firstStringArg(XC_MethodHook.MethodHookParam param) {
@@ -513,6 +645,20 @@ public class PackageInfoHooks {
                         String.class, flags, patcher);
             }
         } catch (Throwable t) { /* Android 13+ overload */ }
+
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getPackageInfoAsUser",
+                    String.class, int.class, int.class, patcher);
+        } catch (Throwable t) { /* optional AsUser overload */ }
+
+        try {
+            Class<?> flags = XposedHelpers.findClassIfExists(
+                    "android.content.pm.PackageManager$PackageInfoFlags", lpparam.classLoader);
+            if (flags != null) {
+                XposedHelpers.findAndHookMethod(appPm, "getPackageInfoAsUser",
+                        String.class, flags, int.class, patcher);
+            }
+        } catch (Throwable t) { /* optional AsUser flags overload */ }
     }
 
     private static void hookGetInstallerPackageName(LoadPackageParam lpparam) {
@@ -595,6 +741,21 @@ public class PackageInfoHooks {
                         String.class, flags, recordHook);
             }
         } catch (Throwable t) { /* Android 13+ overload may not exist */ }
+
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getInstallSourceInfoAsUser",
+                    String.class, int.class, int.class, recordHook);
+        } catch (Throwable t) { /* optional AsUser overload */ }
+
+        try {
+            Class<?> flags = XposedHelpers.findClassIfExists(
+                    "android.content.pm.PackageManager$InstallSourceInfoFlags",
+                    lpparam.classLoader);
+            if (flags != null) {
+                XposedHelpers.findAndHookMethod(appPm, "getInstallSourceInfoAsUser",
+                        String.class, flags, int.class, recordHook);
+            }
+        } catch (Throwable t) { /* optional AsUser flags overload */ }
 
         XC_MethodHook playStoreHook = new XC_MethodHook() {
             @Override

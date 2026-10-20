@@ -369,6 +369,10 @@ public class WebViewHooks {
         if (seedLow == 0) seedLow = 0x9e3779b9;
         String release = ConfigManager.getBuildVersionRelease();
         if (release == null || release.isEmpty()) release = "15";
+        int cores = Math.max(1, ConfigManager.getCpuCoreCount());
+        long memoryGb = Math.round(ConfigManager.getMemoryTotalKb() / (1024.0 * 1024.0));
+        if (memoryGb < 1) memoryGb = 1;
+        if (memoryGb > 8) memoryGb = 8;
         return SCRIPT_TEMPLATE
                 .replace("__DS_SEED__", Integer.toString(seedLow))
                 .replace("__DS_GPU_VENDOR__", esc(ConfigManager.getGpuVendor()))
@@ -378,7 +382,9 @@ public class WebViewHooks {
                 .replace("__DS_SCREEN_W__", Integer.toString(ConfigManager.getScreenWidth()))
                 .replace("__DS_SCREEN_H__", Integer.toString(ConfigManager.getScreenHeight()))
                 .replace("__DS_DPR__",
-                        Float.toString(ConfigManager.getScreenDensity() / 160.0f));
+                        Float.toString(ConfigManager.getScreenDensity() / 160.0f))
+                .replace("__DS_HW_CONCURRENCY__", Integer.toString(cores))
+                .replace("__DS_DEVICE_MEMORY__", Long.toString(memoryGb));
     }
 
     private static String esc(String s) {
@@ -479,8 +485,8 @@ public class WebViewHooks {
             "    function defineNav(name, value){\n" +
             "      try { Object.defineProperty(navigator, name, { get: function(){ return value; }, configurable: true }); } catch(e){}\n" +
             "    }\n" +
-            "    defineNav('hardwareConcurrency', 8);\n" +
-            "    defineNav('deviceMemory', 8);\n" +
+            "    defineNav('hardwareConcurrency', __DS_HW_CONCURRENCY__);\n" +
+            "    defineNav('deviceMemory', __DS_DEVICE_MEMORY__);\n" +
             "    defineNav('maxTouchPoints', 5);\n" +
             "    defineNav('platform', 'Linux armv8l');\n" +
             "    defineNav('language', 'en-US');\n" +

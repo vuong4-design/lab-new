@@ -731,3 +731,52 @@ debug.holmes.package_info_strategy=before
 debug.holmes.package_info_backend=system-server
 debug.holmes.package_info_trace=1
 ```
+
+## Native-first hardening status (2026-10-21)
+
+Implemented in the working tree:
+
+- Native registry (`module_registry.cpp`) scans executable mappings, dedupes by
+  `(dev, inode)`, skips provider modules per hook group, and re-registers hooks
+  after late `dlopen`/`android_dlopen_ext`.
+- Property hooks register on every importer module; synthetic `prop_info`
+  values are enabled only when both find and read hooks have valid originals.
+- Kernel/CPU/memory/storage hooks cover `uname`, `gethostname`, `getifaddrs`,
+  `sysconf`, `sysinfo`, `sched_getaffinity`, `ioctl(SIOCGIFHWADDR)`, `statfs`,
+  and `statvfs`. `/proc/stat`, `/proc/cmdline`, `/proc/bootconfig`, and
+  device-tree model/compatible reads are filtered by the opt-in path guard.
+- GLES/EGL hooks spoof `GL_VENDOR`, `GL_RENDERER`, optional `GL_VERSION`,
+  optional EGL vendor/version, and wrap `eglGetProcAddress` for `glGetString`,
+  `glGetStringi`, and `eglQueryString`. Extension lists and Vulkan are not
+  synthesized.
+- Fake SIM is opt-in (`fake_sim.enabled=1`). It creates one synthetic
+  `SubscriptionInfo` through `CREATOR` on API 33+ (hidden-constructor fallback
+  on older releases), reports dual-capable modem/phone counts, slot 0 READY and
+  slot 1 ABSENT, fakes service/network state, returns no eUICC/EID surface, and
+  fails closed if the synthetic object cannot be built.
+  With it disabled, only IMEI/MEID/serial-style IDs are spoofed; SIM/IMSI/ICCID/
+  phone/subscription state follows the real device.
+- Settings integer hooks cover `adb_enabled`,
+  `development_settings_enabled`, `device_provisioned`, and
+  `stay_on_while_plugged_in`.
+- Package UID queries (`getPackageGids`, `getPackagesForUid`, `getNameForUid`,
+  `getNamesForUids`) filter hidden detection packages when UID query mode is
+  enabled.
+- CI pins `ubuntu-24.04`, uses `android-actions/setup-android@v4`, and installs
+  platform 36, build-tools 34.0.0/36.0.0, NDK 26.3.11579264, and CMake 3.22.1
+  explicitly. The old `@v3` setup action requested Google's removed `tools`
+  package and failed before Gradle ran.
+
+Residual bypasses/blockers:
+
+- No local native compiler/NDK; Gradle fails with `NDK not configured. Download
+  it with SDK manager. Preferred NDK version is '25.1.8937393'.`
+- `getprop` child processes and raw syscalls bypass PLT hooks.
+- `dlsym`-resolved GL/EGL pointers bypass the PLT hook unless routed through
+  `eglGetProcAddress`.
+- Vulkan and GL extension-list synthesis are deferred.
+- The synthetic `SubscriptionInfo` parcel layout is version-sensitive and has
+  not been verified on a device; the implementation logs and leaves real SIM
+  state untouched when construction fails.
+- Runtime verification requires a rooted device/emulator with Zygisk/LSPosed;
+  no device was available here.

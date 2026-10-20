@@ -3,6 +3,8 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 #include <sys/types.h>
 #include <jni.h>
 #include <android/log.h>
@@ -32,6 +34,17 @@ bool ZygiskPltHookRegister(dev_t dev, ino_t inode, const char* symbol,
 
 bool ZygiskPltHookCommit();
 
+void RegisterNativeHookGroup(const char* symbol, void* hook, void** original,
+                             const char* provider_suffix);
+
+void RegisterNativeModuleCallback(void (*callback)(dev_t, ino_t));
+
+void RegisterNativeHooksForPendingModules();
+
+std::vector<std::pair<dev_t, ino_t>> GetNativeLoadedModules();
+
+void RegisterPathGuardOnModule(dev_t dev, ino_t inode);
+
 void InstallPropertyHooks(bool installOptionalHooks);
 
 void InstallPropertyHooks(bool installSystemHooks, bool installDlopenHooks);
@@ -44,14 +57,16 @@ void InstallPropertyHooks(bool installPropertyGet,
 
 void MarkNativeHooksInstalled();
 
-void InstallSystemHooks(dev_t dev, ino_t inode);
+void InstallSystemHooks();
+
+void InstallGpuHooks();
 
 // Installs the native /proc + /sys read guard (maps/smaps/meminfo/sys-net/
 // readlink) across every loaded module. Registers only; the caller commits.
 void InstallPathGuardHooks();
 
 // Re-applies registered PLT hooks on .so files loaded after the initial install.
-void InstallDlopenHooks(dev_t dev, ino_t inode);
+void InstallDlopenHooks();
 
 void InstallJavaHooks(JNIEnv* env, const char* packageName);
 

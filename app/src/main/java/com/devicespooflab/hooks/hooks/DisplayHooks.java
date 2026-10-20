@@ -161,16 +161,6 @@ public class DisplayHooks {
         if (modeClass == null) return;
 
         try {
-            XposedHelpers.findAndHookMethod(modeClass, "getModeId",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            param.setResult(0);
-                        }
-                    });
-        } catch (Throwable t) { logFail("Display.Mode.getModeId", t); }
-
-        try {
             XposedHelpers.findAndHookMethod(modeClass, "getPhysicalWidth",
                     new XC_MethodHook() {
                         @Override

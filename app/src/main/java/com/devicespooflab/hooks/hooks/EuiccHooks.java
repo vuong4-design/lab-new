@@ -20,6 +20,9 @@ public class EuiccHooks {
     public static void hook(LoadPackageParam lpparam, int realDeviceSdk) {
         if (realDeviceSdk < 28) return;
 
+        // Fake SIM mode models a physical-only device: no eUICC/EID surface.
+        if (ConfigManager.isFakeSimEnabled()) return;
+
         Class<?> em = XposedHelpers.findClassIfExists(
                 "android.telephony.euicc.EuiccManager", lpparam.classLoader);
         if (em == null) return;

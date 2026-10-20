@@ -1,5 +1,7 @@
 package com.devicespooflab.hooks.hooks;
 
+import android.content.ComponentName;
+import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.FeatureInfo;
@@ -195,10 +197,18 @@ public final class SystemServerPackageHooks {
                 || "getInstalledApplications".equals(name)
                 || "getPackagesHoldingPermissions".equals(name)
                 || "queryIntentActivities".equals(name)
+                || "queryIntentReceivers".equals(name)
+                || "queryIntentActivityOptions".equals(name)
+                || "queryIntentContentProviders".equals(name)
                 || "queryIntentServices".equals(name)
                 || "queryBroadcastReceivers".equals(name)
                 || "queryContentProviders".equals(name)
                 || "queryInstrumentation".equals(name)
+                || "resolveIntent".equals(name)
+                || "resolveService".equals(name)
+                || "resolveActivity".equals(name)
+                || "resolveContentProvider".equals(name)
+                || "getPersistentApplications".equals(name)
                 || "getInstallerPackageName".equals(name)
                 || "getInstallSourceInfo".equals(name)
                 || "getPackageSetting".equals(name)
@@ -322,7 +332,11 @@ public final class SystemServerPackageHooks {
                 || "getInstallerPackageName".equals(name)
                 || "getInstallSourceInfo".equals(name)
                 || "getPackageSetting".equals(name)
-                || "getPackageSettingInternal".equals(name);
+                || "getPackageSettingInternal".equals(name)
+                || "resolveIntent".equals(name)
+                || "resolveService".equals(name)
+                || "resolveActivity".equals(name)
+                || "resolveContentProvider".equals(name);
     }
 
     private static boolean isPackageHidingActive() {
@@ -702,6 +716,12 @@ public final class SystemServerPackageHooks {
     private static String packageNameOf(Object item) {
         if (item == null) return null;
         if (item instanceof String) return (String) item;
+        if (item instanceof Intent) {
+            Intent intent = (Intent) item;
+            ComponentName component = intent.getComponent();
+            if (component != null) return component.getPackageName();
+            return intent.getPackage();
+        }
         if (item instanceof PackageInfo) return ((PackageInfo) item).packageName;
         if (item instanceof ApplicationInfo) return ((ApplicationInfo) item).packageName;
         if (item instanceof ResolveInfo) {

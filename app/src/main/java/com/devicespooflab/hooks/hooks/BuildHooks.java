@@ -150,6 +150,8 @@ public class BuildHooks {
 
         setStringField(versionClass, "BASE_OS", prop("ro.build.version.base_os", ""));
         setStringField(versionClass, "CODENAME", ConfigManager.getBuildVersionCodename());
+        setIntField(versionClass, "DEVICE_INITIAL_SDK_INT",
+                propInt("ro.build.version.device_initial_sdk_int", 33));
         setStringField(versionClass, "INCREMENTAL", ConfigManager.getBuildVersionIncremental());
         setIntField(versionClass, "MEDIA_PERFORMANCE_CLASS", propInt("ro.odm.build.media_performance_class", 0));
         setIntField(versionClass, "MIN_SUPPORTED_TARGET_SDK_INT", propInt("ro.build.version.min_supported_target_sdk", 26));

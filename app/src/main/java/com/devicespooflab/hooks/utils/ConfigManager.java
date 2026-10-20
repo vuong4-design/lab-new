@@ -1165,6 +1165,10 @@ public class ConfigManager {
         return propIntDef("screen.density", 512);
     }
 
+    public static float getScreenRefreshRate() {
+        return propFloatDef("screen.refresh_rate", 120.0f);
+    }
+
     public static int getCpuCoreCount() {
         return propIntDef("hardware.cpu.cores", propIntDef("cpuinfo.cores", 8));
     }
@@ -1479,6 +1483,12 @@ public class ConfigManager {
         String v = getConfigValue(key);
         if (v == null || v.isEmpty()) return defaultValue;
         try { return Long.parseLong(v); } catch (NumberFormatException e) { return defaultValue; }
+    }
+
+    private static float propFloatDef(String key, float defaultValue) {
+        String v = getConfigValue(key);
+        if (v == null || v.isEmpty()) return defaultValue;
+        try { return Float.parseFloat(v); } catch (NumberFormatException e) { return defaultValue; }
     }
 
     private static boolean propBoolDef(String key, boolean defaultValue) {

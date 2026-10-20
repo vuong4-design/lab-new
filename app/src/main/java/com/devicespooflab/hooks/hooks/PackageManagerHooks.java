@@ -1,7 +1,11 @@
 package com.devicespooflab.hooks.hooks;
 
+import android.content.pm.FeatureInfo;
+
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import com.devicespooflab.hooks.utils.ConfigManager;
 import com.devicespooflab.hooks.xposed.XC_MethodHook;
@@ -99,18 +103,30 @@ public class PackageManagerHooks {
                         Class<?> featureInfoClass = features.getClass().getComponentType();
 
                         List<Object> filtered = new ArrayList<>();
+                        Set<String> present = new HashSet<>();
                         for (Object feature : features) {
                             try {
                                 String name = (String) XposedHelpers.getObjectField(feature, "name");
                                 if (name != null) {
                                     if (!PackageFeaturePolicy.shouldDenyFeature(name)) {
                                         filtered.add(feature);
+                                        present.add(name);
                                     }
                                 } else {
                                     filtered.add(feature);
                                 }
                             } catch (Exception e) {
                                 filtered.add(feature);
+                            }
+                        }
+
+                        for (String forced : PackageFeaturePolicy.forcedFeatures()) {
+                            if (present.contains(forced)) {
+                                continue;
+                            }
+                            Object info = newFeatureInfo(featureInfoClass, forced);
+                            if (info != null) {
+                                filtered.add(info);
                             }
                         }
 
@@ -124,6 +140,22 @@ public class PackageManagerHooks {
                 });
         } catch (Exception e) {
             XposedBridge.log(TAG + ": Failed to hook getSystemAvailableFeatures(): " + e.getMessage());
+        }
+    }
+
+    private static Object newFeatureInfo(Class<?> component, String name) {
+        try {
+            Object info;
+            if (component != null && component != Object.class
+                    && FeatureInfo.class.isAssignableFrom(component)) {
+                info = component.getDeclaredConstructor().newInstance();
+            } else {
+                info = new FeatureInfo();
+            }
+            XposedHelpers.setObjectField(info, "name", name);
+            return info;
+        } catch (Throwable t) {
+            return null;
         }
     }
 }

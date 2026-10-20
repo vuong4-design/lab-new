@@ -170,6 +170,8 @@ public final class SystemServerAccountHooks {
         String name = method.getName();
         return "getAccounts".equals(name)
                 || "getAccountsAsUser".equals(name)
+                || "getAccountsByType".equals(name)
+                || "getAccountsByTypeAsUser".equals(name)
                 || "getAccountsForPackage".equals(name)
                 || "getAccountsByTypeForPackage".equals(name)
                 || "getAccountsAndVisibilityForPackage".equals(name);

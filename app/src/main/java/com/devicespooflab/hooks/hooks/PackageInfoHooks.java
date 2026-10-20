@@ -13,10 +13,13 @@ import com.devicespooflab.hooks.xposed.XposedHelpers;
 import com.devicespooflab.hooks.xposed.LoadPackageParam;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
@@ -29,6 +32,8 @@ public class PackageInfoHooks {
 
     private static final String TAG = "DeviceSpoofLab-PackageInfo";
     private static final long DAY_MS = 86_400_000L;
+    private static final Map<Object, String> INSTALL_SOURCE_PACKAGES =
+            Collections.synchronizedMap(new WeakHashMap<Object, String>());
 
     public static void hook(LoadPackageParam lpparam) {
         PackageInfoPlan plan = PackageInfoPlan.from(lpparam);
@@ -489,7 +494,7 @@ public class PackageInfoHooks {
             protected void afterHookedMethod(MethodHookParam param) {
                 Object result = param.getResult();
                 if (result instanceof PackageInfo) {
-                    patch((PackageInfo) result);
+                    patch((PackageInfo) result, lpparam);
                 }
             }
         };
@@ -522,7 +527,7 @@ public class PackageInfoHooks {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             String packageName = (String) param.args[0];
-                            if (shouldSpoofInstaller(lpparam, packageName)) {
+                            if (shouldSpoofTargetPackage(lpparam, packageName)) {
                                 param.setResult(ConfigManager.getInstallerPackage());
                             }
                         }
@@ -530,9 +535,9 @@ public class PackageInfoHooks {
         } catch (Throwable t) { logFail("getInstallerPackageName", t); }
     }
 
-    private static boolean shouldSpoofInstaller(LoadPackageParam lpparam,
-                                                String packageName) {
-        if (packageName == null || lpparam.packageName == null) {
+    private static boolean shouldSpoofTargetPackage(LoadPackageParam lpparam,
+                                                    String packageName) {
+        if (lpparam == null || packageName == null || lpparam.packageName == null) {
             return false;
         }
         if (!lpparam.packageName.equals(packageName)) {
@@ -553,15 +558,60 @@ public class PackageInfoHooks {
                 "android.app.ApplicationPackageManager", lpparam.classLoader);
         if (appPm == null) return;
 
-        Class<?> sourceInfo = XposedHelpers.findClassIfExists(
+        final Class<?> sourceInfo = XposedHelpers.findClassIfExists(
                 "android.content.pm.InstallSourceInfo", lpparam.classLoader);
         if (sourceInfo == null) return;
 
-        // InstallSourceInfo getters: hook each accessor to return Play Store.
+        XC_MethodHook recordHook = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                Object result = param.getResult();
+                if (result == null || !sourceInfo.isInstance(result)) {
+                    return;
+                }
+                String packageName = firstStringArg(param);
+                if (packageName != null) {
+                    INSTALL_SOURCE_PACKAGES.put(result, packageName);
+                }
+            }
+        };
+
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getInstallSourceInfo",
+                    String.class, recordHook);
+        } catch (Throwable t) { /* overload may be absent */ }
+
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getInstallSourceInfo",
+                    String.class, int.class, recordHook);
+        } catch (Throwable t) { /* overload may be absent */ }
+
+        try {
+            Class<?> flags = XposedHelpers.findClassIfExists(
+                    "android.content.pm.PackageManager$InstallSourceInfoFlags",
+                    lpparam.classLoader);
+            if (flags != null) {
+                XposedHelpers.findAndHookMethod(appPm, "getInstallSourceInfo",
+                        String.class, flags, recordHook);
+            }
+        } catch (Throwable t) { /* Android 13+ overload may not exist */ }
+
         XC_MethodHook playStoreHook = new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
-                param.setResult(ConfigManager.getInstallerPackage());
+                Object info = param.thisObject;
+                String packageName = info == null
+                        ? null : INSTALL_SOURCE_PACKAGES.get(info);
+                if (!shouldSpoofTargetPackage(lpparam, packageName)) {
+                    return;
+                }
+                String value = "getInitiatingPackageName".equals(
+                        param.method.getName())
+                        ? ConfigManager.getInitiatingInstallerPackage()
+                        : ConfigManager.getInstallerPackage();
+                if (value != null) {
+                    param.setResult(value);
+                }
             }
         };
 
@@ -576,11 +626,10 @@ public class PackageInfoHooks {
         }
     }
 
-    private static void patch(PackageInfo pi) {
-        if (pi == null) return;
+    private static void patch(PackageInfo pi, LoadPackageParam lpparam) {
+        if (pi == null || !shouldSpoofTargetPackage(lpparam, pi.packageName)) return;
         long install = stableInstallTime();
         pi.firstInstallTime = install;
-        // lastUpdateTime: random within 0-14 days after install, stable per app.
         pi.lastUpdateTime = install + (Math.abs(stableHash(pi.packageName)) % (14L * DAY_MS));
     }
 

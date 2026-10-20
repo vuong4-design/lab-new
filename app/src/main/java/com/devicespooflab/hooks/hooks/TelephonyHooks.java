@@ -3,6 +3,7 @@ package com.devicespooflab.hooks.hooks;
 import com.devicespooflab.hooks.utils.ConfigManager;
 
 import com.devicespooflab.hooks.xposed.XC_MethodHook;
+import com.devicespooflab.hooks.xposed.XposedBridge;
 import com.devicespooflab.hooks.xposed.XposedHelpers;
 import com.devicespooflab.hooks.xposed.LoadPackageParam;
 
@@ -247,6 +248,111 @@ public class TelephonyHooks {
         } catch (NoSuchMethodError ignored) {
         }
 
+        hookStringResult(telephonyManager, "getNetworkOperator",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.operator.numeric", null);
+                    }
+                }, int.class);
+        hookStringResult(telephonyManager, "getNetworkOperatorName",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.operator.alpha", null);
+                    }
+                }, int.class);
+        hookStringResult(telephonyManager, "getSimOperator",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.sim.operator.numeric", null);
+                    }
+                }, int.class);
+        hookStringResult(telephonyManager, "getSimOperatorName",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.sim.operator.alpha", null);
+                    }
+                }, int.class);
+        hookStringResult(telephonyManager, "getSimCountryIso",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.sim.operator.iso-country", null);
+                    }
+                }, int.class);
+        hookStringResult(telephonyManager, "getNetworkCountryIso",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.operator.iso-country", null);
+                    }
+                }, int.class);
+        hookStringResult(telephonyManager, "getNetworkOperatorForPhone",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.operator.numeric", null);
+                    }
+                }, int.class);
+        hookStringResult(telephonyManager, "getSimOperatorNumeric",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.sim.operator.numeric", null);
+                    }
+                });
+        hookStringResult(telephonyManager, "getSimOperatorNumeric",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.sim.operator.numeric", null);
+                    }
+                }, int.class);
+        hookStringResult(telephonyManager, "getSimOperatorNumericForPhone",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.sim.operator.numeric", null);
+                    }
+                }, int.class);
+        hookStringResult(telephonyManager, "getSimOperatorNameForPhone",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.sim.operator.alpha", null);
+                    }
+                }, int.class);
+        hookStringResult(telephonyManager, "getSimCountryIsoForPhone",
+                new ValueSupplier() {
+                    @Override
+                    public String get() {
+                        return ConfigManager.getSystemProperty("gsm.sim.operator.iso-country", null);
+                    }
+                }, int.class);
+        try {
+            XposedHelpers.findAndHookMethod(telephonyManager, "getSimState",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult(android.telephony.TelephonyManager.SIM_STATE_READY);
+                        }
+                    });
+        } catch (NoSuchMethodError ignored) {
+        }
+        try {
+            XposedHelpers.findAndHookMethod(telephonyManager, "getSimState", int.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult(android.telephony.TelephonyManager.SIM_STATE_READY);
+                        }
+                    });
+        } catch (NoSuchMethodError ignored) {
+        }
+
         // Android 13+ replaced TelephonyManager.getLine1Number() with
         // SubscriptionManager.getPhoneNumber(int) and getPhoneNumber(int, int).
         Class<?> subscriptionManager = XposedHelpers.findClassIfExists(
@@ -269,6 +375,49 @@ public class TelephonyHooks {
                         int.class, int.class, phoneNumberHook);
             } catch (NoSuchMethodError ignored) {
             }
+            hookStringResult(subscriptionManager, "getSubscriberId",
+                    new ValueSupplier() {
+                        @Override
+                        public String get() {
+                            return ConfigManager.getIMSI();
+                        }
+                    }, int.class);
+            hookStringResult(subscriptionManager, "getIccSerialNumber",
+                    new ValueSupplier() {
+                        @Override
+                        public String get() {
+                            return ConfigManager.getICCID();
+                        }
+                    }, int.class);
+        }
+    }
+
+    private interface ValueSupplier {
+        String get();
+    }
+
+    private static void hookStringResult(Class<?> clazz, String methodName,
+                                         ValueSupplier supplier,
+                                         Class<?>... parameterTypes) {
+        Object[] args = new Object[parameterTypes.length + 1];
+        for (int i = 0; i < parameterTypes.length; i++) {
+            args[i] = parameterTypes[i];
+        }
+        args[args.length - 1] = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                String value = supplier.get();
+                if (value != null) {
+                    param.setResult(value);
+                }
+            }
+        };
+        try {
+            XposedHelpers.findAndHookMethod(clazz, methodName, args);
+        } catch (NoSuchMethodError ignored) {
+        } catch (Throwable t) {
+            XposedBridge.log("DeviceSpoofLab-Telephony: failed to hook "
+                    + methodName + ": " + t);
         }
     }
 }

@@ -56,6 +56,46 @@ public class StorageHooks {
         } catch (Throwable t) { logFail("getFreeBlocksLong", t); }
 
         try {
+            XposedHelpers.findAndHookMethod(StatFs.class, "getBlockSize",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult((int) BLOCK_SIZE);
+                        }
+                    });
+        } catch (Throwable t) { logFail("getBlockSize", t); }
+
+        try {
+            XposedHelpers.findAndHookMethod(StatFs.class, "getBlockCount",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult((int) (ConfigManager.getStorageTotalBytes() / BLOCK_SIZE));
+                        }
+                    });
+        } catch (Throwable t) { logFail("getBlockCount", t); }
+
+        try {
+            XposedHelpers.findAndHookMethod(StatFs.class, "getAvailableBlocks",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult((int) (ConfigManager.getStorageAvailableBytes() / BLOCK_SIZE));
+                        }
+                    });
+        } catch (Throwable t) { logFail("getAvailableBlocks", t); }
+
+        try {
+            XposedHelpers.findAndHookMethod(StatFs.class, "getFreeBlocks",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult((int) (ConfigManager.getStorageAvailableBytes() / BLOCK_SIZE));
+                        }
+                    });
+        } catch (Throwable t) { logFail("getFreeBlocks", t); }
+
+        try {
             XposedHelpers.findAndHookMethod(StatFs.class, "getTotalBytes",
                     new XC_MethodHook() {
                         @Override

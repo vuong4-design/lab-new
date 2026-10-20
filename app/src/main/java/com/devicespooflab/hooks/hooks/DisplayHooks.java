@@ -15,7 +15,6 @@ import com.devicespooflab.hooks.xposed.LoadPackageParam;
 public class DisplayHooks {
 
     private static final String TAG = "DeviceSpoofLab-Display";
-    private static final float REFRESH_RATE_HZ = 120.0f;
     private static final boolean ENABLE_RESOURCES_DISPLAY_METRICS_HOOK = false;
 
     public static void hook(LoadPackageParam lpparam) {
@@ -24,6 +23,7 @@ public class DisplayHooks {
             hookResourcesGetDisplayMetrics();
             hookWindowMetrics(lpparam);
             hookRefreshRate();
+            hookDisplayMode(lpparam);
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": init failed: " + t);
         }
@@ -129,7 +129,7 @@ public class DisplayHooks {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            param.setResult(REFRESH_RATE_HZ);
+                            param.setResult(ConfigManager.getScreenRefreshRate());
                         }
                     });
         } catch (Throwable t) { logFail("Display.getRefreshRate", t); }
@@ -153,6 +153,52 @@ public class DisplayHooks {
                         }
                     });
         } catch (Throwable t) { logFail("WindowMetrics.getBounds", t); }
+    }
+
+    private static void hookDisplayMode(LoadPackageParam lpparam) {
+        Class<?> modeClass = XposedHelpers.findClassIfExists(
+                "android.view.Display$Mode", lpparam.classLoader);
+        if (modeClass == null) return;
+
+        try {
+            XposedHelpers.findAndHookMethod(modeClass, "getModeId",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult(0);
+                        }
+                    });
+        } catch (Throwable t) { logFail("Display.Mode.getModeId", t); }
+
+        try {
+            XposedHelpers.findAndHookMethod(modeClass, "getPhysicalWidth",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult(ConfigManager.getScreenWidth());
+                        }
+                    });
+        } catch (Throwable t) { logFail("Display.Mode.getPhysicalWidth", t); }
+
+        try {
+            XposedHelpers.findAndHookMethod(modeClass, "getPhysicalHeight",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult(ConfigManager.getScreenHeight());
+                        }
+                    });
+        } catch (Throwable t) { logFail("Display.Mode.getPhysicalHeight", t); }
+
+        try {
+            XposedHelpers.findAndHookMethod(modeClass, "getRefreshRate",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult(ConfigManager.getScreenRefreshRate());
+                        }
+                    });
+        } catch (Throwable t) { logFail("Display.Mode.getRefreshRate", t); }
     }
 
     private static void applySpoofedMetrics(DisplayMetrics dm) {

@@ -186,8 +186,14 @@ std::string FilterMaps(const std::string& raw) {
 // empty string when there is nothing to override (=> fall through to real file).
 std::string FilterMeminfo(const std::string& raw) {
     std::string total, avail;
-    bool haveTotal = LookupProperty("mem.total_kb", total) && !total.empty();
-    bool haveAvail = LookupProperty("mem.available_kb", avail) && !avail.empty();
+    bool haveTotal = LookupProperty("memory.total_kb", total) && !total.empty();
+    if (!haveTotal) {
+        haveTotal = LookupProperty("mem.total_kb", total) && !total.empty();
+    }
+    bool haveAvail = LookupProperty("memory.available_kb", avail) && !avail.empty();
+    if (!haveAvail) {
+        haveAvail = LookupProperty("mem.available_kb", avail) && !avail.empty();
+    }
     if (!haveTotal && !haveAvail) return std::string();
     std::string out;
     size_t i = 0;

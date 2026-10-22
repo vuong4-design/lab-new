@@ -70,7 +70,27 @@ full profile.
 
 ### Why deferred
 
-Hướng E touches the wire protocol, fd lifecycle, native threading, and the
+Huớng E touches the wire protocol, fd lifecycle, native threading, and the
 immutability assumption of `g_props`. It is a self-contained feature worth doing
-deliberately, not as a patch mid-migration. Restart-based update (Hướng D) is
+deliberately, not as a patch mid-migration. Restart-based update (Huớng D) is
 correct and matches how most Zygisk modules behave.
+
+### Uptime target is a boot-time snapshot
+
+The v1.41 uptime feature follows the same restart-based model. The companion
+selects `uptime.target_seconds` once per companion lifetime (normally one boot)
+and derives `uptime.offset_seconds` from the real `/proc/uptime` at that time.
+Both values are injected into the profile snapshot delivered to each process.
+
+Consequences:
+
+- Editing `hooks.uptime_target_min_days`/`max_days` does not move an existing
+  target. Reboot (or restart the companion) to select a new target.
+- Editing `hooks.uptime_spoof` takes effect only for newly specialized scoped
+  processes; already-running processes keep their current state.
+- A future Huớng E refresh could re-read the profile, but it must not re-pick the
+  target in a running app process. The target must remain boot-scoped and shared
+  by all scoped processes; only an explicit companion restart may change it.
+- Service filtering and self-package timestamps are evaluated from profile
+  values at hook time, so they are easier to refresh than the uptime offset, but
+  no live refresh path exists yet.

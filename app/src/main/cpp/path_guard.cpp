@@ -2,6 +2,7 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +41,8 @@
 
 namespace ds {
 namespace {
+
+std::atomic<bool> g_path_guard_full{false};
 
 using OpenFn       = int (*)(const char*, int, ...);
 using OpenatFn     = int (*)(int, const char*, int, ...);
@@ -372,6 +375,53 @@ std::string FilterProcStat(const std::string& raw) {
     return out;
 }
 
+std::string FilterProcUptime(const std::string& raw) {
+    double uptime = 0.0;
+    double idle = 0.0;
+    if (sscanf(raw.c_str(), "%lf %lf", &uptime, &idle) < 1) {
+        return std::string();
+    }
+    long long offset = GetUptimeOffsetSeconds();
+    double adjustedUptime = uptime + static_cast<double>(offset);
+    double adjustedIdle = idle + static_cast<double>(offset);
+    if (adjustedUptime < 0.0) adjustedUptime = 0.0;
+    if (adjustedIdle < 0.0) adjustedIdle = 0.0;
+    if (adjustedIdle > adjustedUptime) adjustedIdle = adjustedUptime;
+
+    char out[96] = {};
+    snprintf(out, sizeof(out), "%.2f %.2f\n", adjustedUptime, adjustedIdle);
+    return std::string(out);
+}
+
+std::string AdjustProcStatBtime(const std::string& raw) {
+    if (!IsUptimeSpoofEnabled()) return raw;
+    long long offset = GetUptimeOffsetSeconds();
+    if (offset == 0) return raw;
+
+    std::string out;
+    out.reserve(raw.size());
+    size_t i = 0;
+    while (i < raw.size()) {
+        size_t nl = raw.find('\n', i);
+        bool hasNl = (nl != std::string::npos);
+        if (!hasNl) nl = raw.size();
+        std::string line = raw.substr(i, nl - i);
+        if (line.rfind("btime ", 0) == 0) {
+            char* end = nullptr;
+            long long btime = strtoll(line.c_str() + 6, &end, 10);
+            if (end != line.c_str() + 6) {
+                long long adjusted = btime - offset;
+                if (adjusted < 0) adjusted = 0;
+                line = "btime " + std::to_string(adjusted);
+            }
+        }
+        out += line;
+        if (hasNl) out += '\n';
+        i = nl + 1;
+    }
+    return out;
+}
+
 bool LooksVirtual(const std::string& raw) {
     return Contains(raw, "qemu") || Contains(raw, "goldfish")
             || Contains(raw, "ranchu") || Contains(raw, "emulator")
@@ -421,6 +471,26 @@ const char* kFdTag = "dalvik-jit-code-cache";
 int SanitisedFdFor(const char* path) {
     if (path == nullptr) return -1;
     std::string p(path);
+    const bool fullGuard = g_path_guard_full.load(std::memory_order_relaxed);
+    const bool uptimeGuard = IsUptimeSpoofEnabled();
+    if (!fullGuard && !uptimeGuard) return -1;
+
+    if (p == "/proc/uptime") {
+        if (!uptimeGuard) return -1;
+        std::string raw = ReadWholeFileRaw(path);
+        if (raw.empty()) return -1;
+        std::string filtered = FilterProcUptime(raw);
+        if (filtered.empty()) return -1;
+        return MakeContentFd(filtered, kFdTag);
+    }
+    if (p == "/proc/stat") {
+        std::string raw = ReadWholeFileRaw(path);
+        if (raw.empty()) return -1;
+        std::string filtered = fullGuard ? FilterProcStat(raw) : raw;
+        filtered = AdjustProcStatBtime(filtered);
+        return MakeContentFd(filtered, kFdTag);
+    }
+    if (!fullGuard) return -1;
 
     if (p.rfind("/proc/", 0) == 0 &&
         (Contains(p, "/maps") || Contains(p, "/smaps"))) {
@@ -450,11 +520,6 @@ int SanitisedFdFor(const char* path) {
         std::string filtered = FilterProcVersion();
         if (filtered.empty()) return -1;
         return MakeContentFd(filtered, kFdTag);
-    }
-    if (p == "/proc/stat") {
-        std::string raw = ReadWholeFileRaw(path);
-        if (raw.empty()) return -1;
-        return MakeContentFd(FilterProcStat(raw), kFdTag);
     }
     if (p == "/proc/cmdline") {
         std::string raw = ReadWholeFileRaw(path);
@@ -646,25 +711,25 @@ void RegisterPathGuardOnModule(dev_t dev, ino_t inode) {
     RegisterOnModule(dev, inode);
 }
 
-void InstallPathGuardHooks() {
-    // OPT-IN ONLY. This guard PLT-hooks the hot open()/openat()/fopen() family
-    // across every loaded module; a fault anywhere on that path brings down the
-    // whole process. It now stays OFF unless the profile explicitly sets
-    // native.guard=on, so a stock install can never boot-loop because of it.
+void InstallPathGuardHooks(bool allowFullGuard) {
     std::string flag;
-    if (!(LookupProperty("native.guard", flag) && flag == "on")) {
-        DS_LOGW("audit:path guard OFF (set native.guard=on to enable; app processes only)");
+    bool fullGuard = g_path_guard_full.load(std::memory_order_acquire)
+            || (allowFullGuard
+                && LookupProperty("native.guard", flag) && flag == "on");
+    bool uptimeGuard = IsUptimeSpoofEnabled();
+    if (!fullGuard && !uptimeGuard) {
+        DS_LOGW("audit:path guard OFF (set native.guard=on or enable uptime spoof)");
         return;
     }
-    // Hard refusal in system_server regardless of the flag.
     if (IsSystemServer()) {
         DS_LOGW("audit:path guard refused in system_server (unsafe/unneeded)");
         return;
     }
-    // Registers hooks only; the shared ZygiskPltHookCommit() in
-    // InstallPropertyHooks() commits this batch together with the others.
+    g_path_guard_full.store(fullGuard, std::memory_order_release);
     RegisterNativeModuleCallback(&RegisterPathGuardOnModule);
-    DS_LOGW("audit:path guard registered (app process only; maps/smaps/meminfo/cpuinfo/version/mounts/sys-net/readlink)");
+    DS_LOGW("audit:path guard registered mode=%s (app process only)",
+            fullGuard ? (uptimeGuard ? "full+uptime" : "full")
+                      : "uptime-only");
 }
 
 }  // namespace ds

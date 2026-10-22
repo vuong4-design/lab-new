@@ -22,6 +22,7 @@ import com.devicespooflab.hooks.hooks.NetworkHooks;
 import com.devicespooflab.hooks.hooks.PackageInfoHooks;
 import com.devicespooflab.hooks.hooks.PackageManagerHooks;
 import com.devicespooflab.hooks.hooks.SensorHooks;
+import com.devicespooflab.hooks.hooks.ServiceProbeHooks;
 import com.devicespooflab.hooks.hooks.SettingsHooks;
 import com.devicespooflab.hooks.hooks.StorageHooks;
 import com.devicespooflab.hooks.hooks.SystemPropertiesHooks;
@@ -185,8 +186,10 @@ public final class HookEntry {
         runHook("NetworkHooks",         verbose, () -> NetworkHooks.hook(lpparam));
 
         if (!isOwnPackage) {
+            runHook("ServiceProbeHooks", verbose, () -> ServiceProbeHooks.hook(lpparam));
             runHook("DisplayHooks", verbose, () -> DisplayHooks.hook(lpparam));
         } else {
+            logSkip(verbose, "ServiceProbeHooks");
             logSkip(verbose, "DisplayHooks");
         }
 
@@ -416,6 +419,7 @@ public final class HookEntry {
                 runHook("MediaDrmHooks", verbose, () -> MediaDrmHooks.hook(lpparam));
                 runHook("WebViewHooks", verbose, () -> WebViewHooks.hook(lpparam));
                 runHook("PackageManagerHooks", verbose, () -> PackageManagerHooks.hook(lpparam));
+                runHook("ServiceProbeHooks", verbose, () -> ServiceProbeHooks.hook(lpparam));
                 runHook("NetworkHooks", verbose, () -> NetworkHooks.hook(lpparam));
                 runHook("DisplayHooks", verbose, () -> DisplayHooks.hook(lpparam));
                 runHook("SensorHooks", verbose, () -> SensorHooks.hook(lpparam));

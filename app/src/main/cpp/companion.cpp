@@ -7,7 +7,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -33,6 +37,106 @@ struct FileCache {
 
 FileCache g_profile_cache;
 FileCache g_scope_cache;
+
+std::mutex g_uptime_mutex;
+long long g_uptime_target_seconds = 0;
+long long g_uptime_offset_seconds = 0;
+
+bool Truthy(const std::string& value) {
+    return value == "1" || value == "true" || value == "TRUE"
+            || value == "yes" || value == "YES"
+            || value == "on" || value == "ON";
+}
+
+long long ParseLong(const std::string& value, long long fallback) {
+    if (value.empty()) return fallback;
+    char* end = nullptr;
+    long long parsed = strtoll(value.c_str(), &end, 10);
+    if (end == value.c_str() || *end != '\0') return fallback;
+    return parsed;
+}
+
+uint64_t RandomU64() {
+    uint64_t value = 0;
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        ssize_t n = read(fd, &value, sizeof(value));
+        close(fd);
+        if (n == static_cast<ssize_t>(sizeof(value))) return value;
+    }
+    auto now = std::chrono::steady_clock::now().time_since_epoch();
+    value = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+    value ^= static_cast<uint64_t>(getpid()) << 32;
+    value ^= static_cast<uint64_t>(time(nullptr));
+    return value;
+}
+
+long long ReadRealUptimeSeconds() {
+    int fd = open("/proc/uptime", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    char buf[128] = {};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    char* end = nullptr;
+    double uptime = strtod(buf, &end);
+    if (end == buf || uptime < 0.0) return 0;
+    return static_cast<long long>(uptime);
+}
+
+bool UptimeEnabled(const std::unordered_map<std::string, std::string>& profile) {
+    auto it = profile.find("hooks.uptime_spoof");
+    if (it == profile.end() || it->second.empty()) return true;
+    return Truthy(it->second);
+}
+
+long long PickUptimeTargetSeconds(
+        const std::unordered_map<std::string, std::string>& profile,
+        long long& offsetOut) {
+    long long minDays = ParseLong(
+            profile.count("hooks.uptime_target_min_days")
+                    ? profile.at("hooks.uptime_target_min_days") : std::string(),
+            1);
+    long long maxDays = ParseLong(
+            profile.count("hooks.uptime_target_max_days")
+                    ? profile.at("hooks.uptime_target_max_days") : std::string(),
+            7);
+    if (minDays < 1) minDays = 1;
+    if (minDays > 30) minDays = 30;
+    if (maxDays < 1) maxDays = 1;
+    if (maxDays > 30) maxDays = 30;
+    if (maxDays < minDays) maxDays = minDays;
+
+    std::lock_guard<std::mutex> lock(g_uptime_mutex);
+    if (g_uptime_target_seconds <= 0) {
+        const long long minSeconds = minDays * 86400LL;
+        const long long maxSeconds = maxDays * 86400LL;
+        const uint64_t span = static_cast<uint64_t>(
+                maxSeconds - minSeconds + 1);
+        g_uptime_target_seconds = minSeconds
+                + static_cast<long long>(RandomU64() % span);
+        g_uptime_offset_seconds =
+                g_uptime_target_seconds - ReadRealUptimeSeconds();
+        DS_LOGW("audit:companion uptime target selected seconds=%lld days=%.2f offset=%lld",
+                g_uptime_target_seconds,
+                static_cast<double>(g_uptime_target_seconds) / 86400.0,
+                g_uptime_offset_seconds);
+    }
+    offsetOut = g_uptime_offset_seconds;
+    return g_uptime_target_seconds;
+}
+
+void InjectUptimeProfile(std::unordered_map<std::string, std::string>& profile) {
+    if (!UptimeEnabled(profile)) return;
+    long long offset = 0;
+    long long target = PickUptimeTargetSeconds(profile, offset);
+    long long realUptime = target - offset;
+    profile["uptime.target_seconds"] = std::to_string(target);
+    profile["uptime.offset_seconds"] = std::to_string(offset);
+    DS_LOGW("audit:companion uptime profile target=%lld real=%lld offset=%lld",
+            target, realUptime, offset);
+}
 
 // Returns true if the file at path is unchanged versus the cache stamp.
 bool CacheFresh(const FileCache& cache, const struct stat& st) {
@@ -176,6 +280,7 @@ void CompanionHandler(int client) {
                 auto profile = LoadCached("profile", ds::kProfilePath,
                                           g_profile_cache,
                                           &ParseKeyValueFile);
+                InjectUptimeProfile(profile);
                 DS_LOGW("audit:companion reply profile count=%zu",
                         (size_t)profile.size());
                 if (!SendPairs(client, profile)) return;

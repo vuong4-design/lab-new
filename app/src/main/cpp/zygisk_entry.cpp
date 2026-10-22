@@ -32,7 +32,7 @@ constexpr const char* kOwnPackage = "com.devicespooflab.hooks";
 constexpr const char* kRiskDetectorPackage = "io.liankong.riskdetector";
 constexpr const char* kNativeCheckPackage = "com.reveny.nativecheck";
 constexpr const char* kHolmesPackage = "me.garfieldhan.holmes";
-constexpr const char* kModuleBuildVersion = "v1.40-java-hook-controls";
+constexpr const char* kModuleBuildVersion = "v1.41-uptime-service-times";
 
 // Read a length-prefixed line list from a fd opened on scope.list. The
 // companion sends scope entries through RequestPairs (key = package, empty
@@ -180,6 +180,15 @@ int LookupIntProperty(const char* key, int defaultValue, int minValue,
     return static_cast<int>(parsed);
 }
 
+long long LookupLongLongProperty(const char* key, long long defaultValue) {
+    std::string value = LookupStringProperty(key);
+    if (value.empty()) return defaultValue;
+    char* end = nullptr;
+    long long parsed = strtoll(value.c_str(), &end, 10);
+    if (end == value.c_str() || *end != '\0') return defaultValue;
+    return parsed;
+}
+
 bool StartsWith(const std::string& value, const char* prefix) {
     if (prefix == nullptr) return false;
     std::string p(prefix);
@@ -285,6 +294,7 @@ void InstallNativeHookPlan(const NativeHookPlan& plan,
     if (!plan.installCore) {
         // Treat off/unknown as an explicit native policy. Without reserving,
         // the Java fallback path could install the default native hooks later.
+        ds::SetUptimeSpoofState(false, 0);
         ds::MarkNativeHooksInstalled();
         DS_LOGW("audit:native hooks skipped package=%s nativeMode=%s baseMode=%s",
                 packageName.c_str(), plan.rawMode.c_str(),
@@ -296,6 +306,13 @@ void InstallNativeHookPlan(const NativeHookPlan& plan,
         // Reserve native installation now so Java fallback cannot install the
         // same PLT hooks immediately before the delayed policy fires.
         ds::MarkNativeHooksInstalled();
+        if (ds::IsUptimeSpoofEnabled()) {
+            ds::InstallUptimeHooks();
+            ds::RegisterNativeHooksForPendingModules();
+            bool uptimeCommitted = ds::ZygiskPltHookCommit();
+            DS_LOGW("audit:late uptime immediate package=%s commit=%d",
+                    packageName.c_str(), uptimeCommitted);
+        }
         std::thread([propGet = plan.installPropGet,
                      propFind = plan.installPropFind,
                      propCallback = plan.installPropCallback,
@@ -364,6 +381,7 @@ public:
         should_spoof_ = false;
         profile_.clear();
         package_name_.clear();
+        ds::SetUptimeSpoofState(false, 0);
 
         if (args == nullptr || args->nice_name == nullptr) {
             dontUnload();
@@ -454,6 +472,7 @@ public:
         profile_.clear();
         should_spoof_ = false;
         package_name_ = "system_server";
+        ds::SetUptimeSpoofState(false, 0);
 
         int companionFd = api_->connectCompanion();
         if (companionFd < 0) {
@@ -513,6 +532,7 @@ private:
     void cleanProcess() {
         // Not in scope: drop all of our files from this process's mount
         // namespace and unload the library so we leave no trace.
+        ds::SetUptimeSpoofState(false, 0);
         closeModuleDir();
         api_->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
         api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
@@ -537,6 +557,17 @@ private:
         DS_LOGW("audit:profile loaded keys=%zu brand=%s model=%s fp=%s",
                 (size_t)ds::g_props.size(), brand.c_str(), model.c_str(),
                 fingerprint.c_str());
+
+        const bool uptimeEnabled = installJavaHooks
+                && LookupBoolProperty("hooks.uptime_spoof", true);
+        const long long uptimeOffset = LookupLongLongProperty(
+                "uptime.offset_seconds", 0);
+        ds::SetUptimeSpoofState(uptimeEnabled && uptimeOffset != 0,
+                                uptimeOffset);
+        DS_LOGW("audit:uptime plan package=%s installJava=%d enabled=%d offset=%lld",
+                package_name_.c_str(), installJavaHooks ? 1 : 0,
+                (uptimeEnabled && uptimeOffset != 0) ? 1 : 0, uptimeOffset);
+
         bool riskDetectorCompat =
                 IsPackageProcess(package_name_, kRiskDetectorPackage);
         bool nativeCheckCompat =

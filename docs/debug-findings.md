@@ -6,12 +6,13 @@ compat mode.
 
 ## Current baseline
 
-- Current module marker: `v1.40-java-hook-controls`.
+- Current module marker: `v1.41-uptime-service-times`.
 - Build artifact to flash: `DeviceSpoofLabs-Hooks-Zygisk.zip`.
 - Standalone UI APK should still be installed separately for launcher icon and
   reliable UI access.
-- Local Windows build was not verified because `JAVA_HOME`/`java` is missing in
-  this workspace. GitHub Actions remains the working build path.
+- Local Windows Java compilation works with JDK 21 and
+  `platforms/android-35/android.jar`. Native Gradle builds still need NDK
+  26.3.11579264/build-tools 36 from GitHub Actions.
 
 ## Global issues found
 
@@ -139,7 +140,9 @@ Finding:
 
 Mitigation:
 
-- `hooks.package_info_times=0` is the default.
+- The default was `hooks.package_info_times=0` through v1.40. v1.41 enables it
+  by default for the scoped package itself only, with a stable build-date anchor
+  and `lastUpdateTime` clamped to the current time.
 - Installer/source hooks remain available.
 - `hooks.hide_detection_packages=1` hides configured package names from
   `getPackageInfo`, `getApplicationInfo`, `getPackageUid`,
@@ -652,6 +655,110 @@ audit:InstallJavaHooks xposed natives skipped for lsplant-free stage
   from ART/JIT, WebView, Zygisk internals, or other modules, not the
   LSPlant-backed Java hook path.
 
+## v1.41 uptime, service-list, and timestamp spoofing
+
+Status: implemented in the working tree. Java sources compile against
+`android-35/android.jar`; native Gradle/CI and device verification are still
+pending.
+
+Goal:
+
+- Make freshly installed scoped apps see an uptime of one to seven days instead
+  of the real device uptime.
+- Hide known root/hook/emulator services from Java `ServiceManager` probes.
+- Keep self package timestamps plausible and stable without making
+  `lastUpdateTime < firstInstallTime`.
+
+Config:
+
+```ini
+hooks.uptime_spoof=1
+hooks.uptime_target_min_days=1
+hooks.uptime_target_max_days=7
+hooks.service_list_spoof=1
+hooks.service_hidden_keywords=lsposed,lspd,edxp,zygisk,magisk,kernelsu,ksud,apatch,shamiko,susfs,frida,qemu,goldfish,ranchu,redroid,waydroid,cuttlefish,bluestacks,ldplayer,mumu,memu,genymotion,uiautomator,instrumentation
+hooks.package_info_times=1
+```
+
+Uptime architecture:
+
+- The companion chooses one integer target per companion lifetime. With the
+  defaults this is uniformly random in `[86400, 604800]` seconds.
+- The companion injects `uptime.target_seconds` and
+  `uptime.offset_seconds = target - real_uptime` into the profile. The target
+  is intentionally a snapshot; changing min/max requires companion restart.
+- Zygisk applies the offset only to app processes in scope when
+  `installJavaHooks` is true. `system_server`, module UI, and out-of-scope
+  processes stay at real uptime.
+- Native `clock_gettime` adds the offset to `CLOCK_MONOTONIC`,
+  `CLOCK_MONOTONIC_RAW`, `CLOCK_BOOTTIME`, and `CLOCK_BOOTTIME_ALARM`.
+  Java `SystemClock` is not hooked, because the AOSP path already reaches the
+  native call; hooking both would double-add the offset.
+- `sysinfo.uptime` is adjusted. The path guard rewrites `/proc/uptime` and the
+  `btime` line in `/proc/stat`. Uptime-only mode does not touch maps, memory,
+  mounts, CPU data, or other kernel files.
+- Full path guard (`native.guard=on`) and uptime path guard are independent:
+  uptime may use its narrow guard with `native.guard=off`, while full guard
+  still includes all previous filtering.
+
+Expected logs:
+
+```text
+audit:companion uptime profile target=... real=... offset=...
+audit:uptime state enabled=1 offset=...
+audit:uptime hooks registered offset=... mode=clock_gettime+sysinfo+path-guard
+audit:path guard registered mode=full+uptime (app process only)
+audit:path guard registered mode=uptime-only (app process only)
+```
+
+Service-list spoofing:
+
+- `android.os.ServiceManager` `listServices`, optional `getServiceNames`,
+  `getService(String)`, and `checkService(String)` are hooked in the app process.
+- Filtering is case-insensitive substring matching against
+  `hooks.service_hidden_keywords`; a keyword must be at least two characters.
+- This is a keyword model, not a baseline-diff model. A service hidden by name
+  is also hidden from direct `getService`/`checkService` lookups.
+- `nox` is intentionally absent from the defaults because substring matching
+  would also hide Samsung `knox` services.
+- Direct binder calls through `IServiceManager` still bypass this Java hook.
+- Compat gating is unchanged: normal stage and RiskDetector `java_stage=all`
+  request service spoofing; NativeCheck `none` and Holmes `pkginfo` do not.
+
+Timestamp spoofing:
+
+- The stable anchor is `ro.build.date.utc` (fallback `1749081600`,
+  2025-06-05 UTC), plus 60-120 days seeded by package/fingerprint.
+- `firstInstallTime` uses that anchor. `lastUpdateTime` is the anchor plus
+  0-14 days, clamped to the current time. Repeated queries return the same
+  values, and ordering is preserved.
+- Only the module's own package is patched. `getPackageInfo*`,
+  `getInstalledPackages*`, and `IPackageManager` proxy lists are covered.
+- `hooks.package_info_times=1` is now the default because it remains within the
+  self-only scope and is requested by RiskDetector `all`.
+
+Verification checklist:
+
+1. Run `cat /proc/uptime`, `awk '$1=="btime"' /proc/stat`, and
+   `SystemClock.elapsedRealtime()` in a scoped test app. All should agree with
+   the selected target (within seconds).
+2. Compare with an out-of-scope app and `system_server`; both should remain
+   real.
+3. Call `ServiceManager.listServices()` and `getService("magisk")` in scope.
+4. Query `getPackageInfo(self, 0)` twice and confirm stable timestamps.
+5. Repeat with `native_hook_mode=core`, `late-core`, and `system` to confirm
+   uptime still installs without full system hooks.
+
+Residual bypasses:
+
+- Raw `syscall()`/`vdso` clock reads and direct binder service lookups.
+- `/proc/self/stat` starttime and other per-process uptime-derived fields are
+  not adjusted.
+- `/proc/uptime` idle is clamped to the adjusted uptime; it is a heuristic, not
+  a faithful multi-core idle reconstruction.
+- App lifecycle or process death still resets/actually advances uptime normally;
+  the fake value is an offset over real monotonic time, not a frozen clock.
+
 ## Debug decision tree for new apps
 
 1. Confirm scope/profile:
@@ -712,6 +819,11 @@ debug.riskdetector.native_mode=core
 debug.riskdetector.native_delay_ms=0
 ```
 
+In v1.41, RiskDetector `java_stage=all` also receives service-list hiding and
+self timestamps because both default to on and `all` includes their surfaces.
+NativeCheck `none` and Holmes `pkginfo` do not request service hooks; Holmes also
+needs the `times` token to enable timestamps.
+
 NativeCheck:
 
 ```ini
@@ -732,9 +844,9 @@ debug.holmes.package_info_backend=system-server
 debug.holmes.package_info_trace=1
 ```
 
-## Native-first hardening status (2026-10-21)
+## Native-first hardening status (2026-10-22)
 
-Implemented in the working tree:
+Implemented in the current build:
 
 - Native registry (`module_registry.cpp`) scans executable mappings, dedupes by
   `(dev, inode)`, skips provider modules per hook group, and re-registers hooks
@@ -743,17 +855,21 @@ Implemented in the working tree:
   values are enabled only when both find and read hooks have valid originals.
 - Kernel/CPU/memory/storage hooks cover `uname`, `gethostname`, `getifaddrs`,
   `sysconf`, `sysinfo`, `sched_getaffinity`, `ioctl(SIOCGIFHWADDR)`, `statfs`,
-  and `statvfs`. `/proc/stat`, `/proc/cmdline`, `/proc/bootconfig`, and
-  device-tree model/compatible reads are filtered by the opt-in path guard.
+  and `statvfs`. The `ioctl` trampoline uses a fixed three-argument signature
+  instead of reading a possibly absent vararg. `/proc/stat`, `/proc/cmdline`,
+  `/proc/bootconfig`, and device-tree model/compatible reads are filtered by the
+  opt-in path guard. Uptime mode additionally adjusts monotonic clocks,
+  `sysinfo.uptime`, `/proc/uptime`, and `btime` with a narrow app-only guard.
 - GLES/EGL hooks spoof `GL_VENDOR`, `GL_RENDERER`, optional `GL_VERSION`,
-  optional EGL vendor/version, and wrap `eglGetProcAddress` for `glGetString`,
-  `glGetStringi`, and `eglQueryString`. Extension lists and Vulkan are not
-  synthesized.
+  optional EGL vendor/version, and wrap `eglGetProcAddress` and `dlsym` for
+  `glGetString`, `glGetStringi`, `eglQueryString`, and
+  `eglGetProcAddress`. Extension lists and Vulkan are not synthesized.
 - Fake SIM is opt-in (`fake_sim.enabled=1`). It creates one synthetic
   `SubscriptionInfo` through `CREATOR` on API 33+ (hidden-constructor fallback
   on older releases), reports dual-capable modem/phone counts, slot 0 READY and
   slot 1 ABSENT, fakes service/network state, returns no eUICC/EID surface, and
-  fails closed if the synthetic object cannot be built.
+  fails closed if the synthetic object cannot be built. The API 33+ parcel field
+  order was checked against the `android16-release` `SubscriptionInfo.CREATOR`.
   With it disabled, only IMEI/MEID/serial-style IDs are spoofed; SIM/IMSI/ICCID/
   phone/subscription state follows the real device.
 - Settings integer hooks cover `adb_enabled`,
@@ -769,11 +885,10 @@ Implemented in the working tree:
 
 Residual bypasses/blockers:
 
-- No local native compiler/NDK; Gradle fails with `NDK not configured. Download
-  it with SDK manager. Preferred NDK version is '25.1.8937393'.`
+- The GitHub Actions build on `165b07b` succeeded; the local SDK still lacks
+  NDK/build-tools, so local Gradle remains unavailable.
 - `getprop` child processes and raw syscalls bypass PLT hooks.
-- `dlsym`-resolved GL/EGL pointers bypass the PLT hook unless routed through
-  `eglGetProcAddress`.
+- `dlvsym`/raw function-pointer resolution bypasses the `dlsym`/GL wrappers.
 - Vulkan and GL extension-list synthesis are deferred.
 - The synthetic `SubscriptionInfo` parcel layout is version-sensitive and has
   not been verified on a device; the implementation logs and leaves real SIM

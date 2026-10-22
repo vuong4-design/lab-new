@@ -1,10 +1,12 @@
 #include "ds_state.h"
 
-#include <cstdarg>
+#include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <ifaddrs.h>
 #include <linux/if_packet.h>
 #include <linux/sockios.h>
@@ -12,9 +14,11 @@
 #include <netinet/in.h>
 #include <sched.h>
 #include <string>
+#include <time.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <sys/utsname.h>
 #include <sys/vfs.h>
@@ -22,15 +26,19 @@
 
 namespace ds {
 
+std::atomic<bool> g_uptime_active{false};
+std::atomic<long long> g_uptime_offset_seconds{0};
+
 namespace {
 
+int (*orig_clock_gettime)(clockid_t, struct timespec*) = nullptr;
 int (*orig_uname)(struct utsname*) = nullptr;
 int (*orig_gethostname)(char*, size_t) = nullptr;
 int (*orig_getifaddrs)(struct ifaddrs**) = nullptr;
 long (*orig_sysconf)(int) = nullptr;
 int (*orig_sysinfo)(struct sysinfo*) = nullptr;
 int (*orig_sched_getaffinity)(pid_t, size_t, cpu_set_t*) = nullptr;
-int (*orig_ioctl)(int, unsigned long, ...) = nullptr;
+int (*orig_ioctl)(int, unsigned long, void*) = nullptr;
 int (*orig_statfs)(const char*, struct statfs*) = nullptr;
 int (*orig_statvfs)(const char*, struct statvfs*) = nullptr;
 
@@ -55,6 +63,43 @@ int CpuCoreCount() {
     if (configured < 1) configured = 1;
     if (configured > CPU_SETSIZE) configured = CPU_SETSIZE;
     return static_cast<int>(configured);
+}
+
+bool IsAdjustableMonotonicClock(clockid_t clockId) {
+    if (clockId == CLOCK_MONOTONIC || clockId == CLOCK_MONOTONIC_RAW) {
+        return true;
+    }
+#ifdef CLOCK_BOOTTIME
+    if (clockId == CLOCK_BOOTTIME) return true;
+#endif
+#ifdef CLOCK_BOOTTIME_ALARM
+    if (clockId == CLOCK_BOOTTIME_ALARM) return true;
+#endif
+    return false;
+}
+
+int my_clock_gettime(clockid_t clockId, struct timespec* tp) {
+    int rc = 0;
+    if (orig_clock_gettime != nullptr) {
+        rc = orig_clock_gettime(clockId, tp);
+    } else {
+#ifdef __NR_clock_gettime
+        rc = static_cast<int>(syscall(__NR_clock_gettime, clockId, tp));
+#else
+        errno = ENOSYS;
+        rc = -1;
+#endif
+    }
+    if (rc != 0 || tp == nullptr || !IsUptimeSpoofEnabled()) {
+        return rc;
+    }
+    if (!IsAdjustableMonotonicClock(clockId)) return rc;
+
+    long long adjusted = static_cast<long long>(tp->tv_sec)
+            + g_uptime_offset_seconds.load(std::memory_order_relaxed);
+    if (adjusted < 0) adjusted = 0;
+    tp->tv_sec = static_cast<time_t>(adjusted);
+    return rc;
 }
 
 int my_uname(struct utsname* u) {
@@ -143,6 +188,13 @@ int my_sysinfo(struct sysinfo* info) {
     int rc = orig_sysinfo ? orig_sysinfo(info) : -1;
     if (rc != 0 || info == nullptr) return rc;
 
+    if (IsUptimeSpoofEnabled()) {
+        long long adjusted = static_cast<long long>(info->uptime)
+                + g_uptime_offset_seconds.load(std::memory_order_relaxed);
+        if (adjusted < 0) adjusted = 0;
+        info->uptime = static_cast<unsigned long>(adjusted);
+    }
+
     long totalKb = LookupLong("memory.total_kb", -1);
     long availableKb = LookupLong("memory.available_kb", -1);
     unsigned long long unit = info->mem_unit == 0 ? 1 : info->mem_unit;
@@ -182,12 +234,7 @@ bool IsDataPath(const char* path) {
             || strncmp(path, "/storage/emulated", 17) == 0;
 }
 
-int my_ioctl(int fd, unsigned long request, ...) {
-    va_list ap;
-    va_start(ap, request);
-    void* arg = va_arg(ap, void*);
-    va_end(ap);
-
+int my_ioctl(int fd, unsigned long request, void* arg) {
     int rc = orig_ioctl ? orig_ioctl(fd, request, arg) : -1;
     if (rc != 0 || request != SIOCGIFHWADDR || arg == nullptr) {
         return rc;
@@ -248,6 +295,43 @@ int my_statvfs(const char* path, struct statvfs* buf) {
 }
 
 }  // namespace
+
+void SetUptimeSpoofState(bool enabled, long long offsetSeconds) {
+    g_uptime_offset_seconds.store(offsetSeconds, std::memory_order_relaxed);
+    g_uptime_active.store(enabled, std::memory_order_release);
+    DS_LOGW("audit:uptime state enabled=%d offset=%lld",
+            enabled ? 1 : 0, offsetSeconds);
+}
+
+bool IsUptimeSpoofEnabled() {
+    return g_uptime_active.load(std::memory_order_acquire);
+}
+
+long long GetUptimeOffsetSeconds() {
+    return g_uptime_offset_seconds.load(std::memory_order_relaxed);
+}
+
+void InstallUptimeHooks() {
+    if (!IsUptimeSpoofEnabled()) {
+        DS_LOGW("audit:uptime hooks skipped state=off");
+        return;
+    }
+    static std::atomic<bool> installed{false};
+    if (installed.exchange(true)) {
+        InstallPathGuardHooks(false);
+        return;
+    }
+
+    RegisterNativeHookGroup("clock_gettime",
+                            reinterpret_cast<void*>(&my_clock_gettime),
+                            reinterpret_cast<void**>(&orig_clock_gettime),
+                            nullptr);
+    RegisterNativeHookGroup("sysinfo", reinterpret_cast<void*>(&my_sysinfo),
+                            reinterpret_cast<void**>(&orig_sysinfo), "/libc.so");
+    InstallPathGuardHooks(false);
+    DS_LOGW("audit:uptime hooks registered offset=%lld mode=clock_gettime+sysinfo+path-guard",
+            GetUptimeOffsetSeconds());
+}
 
 void InstallSystemHooks() {
     RegisterNativeHookGroup("uname", reinterpret_cast<void*>(&my_uname),

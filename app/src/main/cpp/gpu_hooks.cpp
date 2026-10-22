@@ -2,6 +2,7 @@
 
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
+#include <dlfcn.h>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -15,6 +16,8 @@ const GLubyte* (*orig_glGetStringi)(GLenum, GLuint) = nullptr;
 const char* (*orig_eglQueryString)(EGLDisplay, EGLint) = nullptr;
 __eglMustCastToProperFunctionPointerType (*orig_eglGetProcAddress)(const char*) =
         nullptr;
+void* (*orig_dlsym)(void*, const char*) = nullptr;
+void* (*g_dlsym_fallback)(void*, const char*) = nullptr;
 
 std::mutex g_gpu_mutex;
 std::string g_gl_vendor;
@@ -93,10 +96,39 @@ __eglMustCastToProperFunctionPointerType my_eglGetProcAddress(
             ? orig_eglGetProcAddress(procName) : nullptr;
 }
 
+void LoadDlsymFallback() {
+    if (g_dlsym_fallback != nullptr) return;
+    void* dl = dlopen("libdl.so", RTLD_NOW);
+    if (dl == nullptr) return;
+    g_dlsym_fallback = reinterpret_cast<void* (*)(void*, const char*)>(
+            dlsym(dl, "dlsym"));
+    dlclose(dl);
+}
+
+void* my_dlsym(void* handle, const char* symbol) {
+    if (symbol != nullptr) {
+        if (strcmp(symbol, "glGetString") == 0) {
+            return reinterpret_cast<void*>(&my_glGetString);
+        }
+        if (strcmp(symbol, "glGetStringi") == 0) {
+            return reinterpret_cast<void*>(&my_glGetStringi);
+        }
+        if (strcmp(symbol, "eglQueryString") == 0) {
+            return reinterpret_cast<void*>(&my_eglQueryString);
+        }
+        if (strcmp(symbol, "eglGetProcAddress") == 0) {
+            return reinterpret_cast<void*>(&my_eglGetProcAddress);
+        }
+    }
+    if (orig_dlsym != nullptr) return orig_dlsym(handle, symbol);
+    return g_dlsym_fallback ? g_dlsym_fallback(handle, symbol) : nullptr;
+}
+
 }  // namespace
 
 void InstallGpuHooks() {
     LoadGpuStrings();
+    LoadDlsymFallback();
     RegisterNativeHookGroup("glGetString",
                             reinterpret_cast<void*>(&my_glGetString),
                             reinterpret_cast<void**>(&orig_glGetString),
@@ -113,7 +145,9 @@ void InstallGpuHooks() {
                             reinterpret_cast<void*>(&my_eglGetProcAddress),
                             reinterpret_cast<void**>(&orig_eglGetProcAddress),
                             "/libEGL.so");
-    DS_LOGW("audit:gpu hooks registered provider=/libGLESv2.so,/libEGL.so");
+    RegisterNativeHookGroup("dlsym", reinterpret_cast<void*>(&my_dlsym),
+                            reinterpret_cast<void**>(&orig_dlsym), "/libdl.so");
+    DS_LOGW("audit:gpu hooks registered provider=/libGLESv2.so,/libEGL.so,/libdl.so");
 }
 
 }  // namespace ds

@@ -11,8 +11,8 @@ android {
         applicationId = "com.devicespooflab.hooks"
         minSdk = 26
         targetSdk = 34
-        versionCode = 42
-        versionName = "1.40"
+        versionCode = 43
+        versionName = "1.41"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

@@ -26,8 +26,10 @@ An toàn:
 - Mọi thao tác đọc nội bộ dùng **raw syscall** → không bao giờ đệ quy vào
   chính hook của mình.
 - Mọi nhánh lỗi → gọi hàm gốc (I/O bình thường không bao giờ hỏng).
-- Kill-switch: đặt khóa profile `native.guard=off` để tắt hoàn toàn.
-- Chỉ cài cùng nhóm system-hook, chung một `ZygiskPltHookCommit()`.
+- Kill-switch: `native.guard=off` tắt full guard; `hooks.uptime_spoof=0` tắt
+  uptime guard.
+- Full guard cài cùng nhóm system-hook; uptime guard vẫn cài được ở chế độ
+  core-only.
 
 ## 2. Gỡ chuỗi tĩnh module path — `java_loader.cpp`
 
@@ -134,3 +136,47 @@ guard. Nhưng:
 
 Để thử nghiệm chống 2 phát hiện này: đặt `native.guard=on` trong
 `device_profile.conf` (chỉ tác dộng app, không động system_server), rồi test kỹ.
+
+---
+
+## v1.41 — Uptime guard và service/timestamp spoofing
+
+Trạng thái: đã triển khai trong working tree; Java compile pass, native CI và
+device test chưa chạy.
+
+### Uptime path guard (uptime-only)
+
+Ngoài full guard `native.guard=on`, v1.41 thêm chế độ hẹp chỉ phục vụ uptime:
+
+- Chỉ can thiệp `/proc/uptime` và dòng `btime` trong `/proc/stat`.
+- Không lọc maps, smaps, meminfo, mounts, CPU topology, hay `/sys`.
+- Chỉ cài trong app process; `IsSystemServer()` vẫn từ chối tuyệt đối.
+- Có thể chạy khi `native.guard=off` nếu `hooks.uptime_spoof=1` và app trong
+  scope. Full guard và uptime guard dùng chung callback nhưng độc lập flag.
+- Kill-switch riêng: `hooks.uptime_spoof=0` (không cần tắt full guard).
+
+### Native time surface
+
+- Companion chọn target một lần mỗi lifetime: mặc định random 1–7 ngày.
+- Offset = target - real uptime, inject vào profile.
+- `clock_gettime` cộng offset cho `CLOCK_MONOTONIC`, `MONOTONIC_RAW`,
+  `BOOTTIME`, `BOOTTIME_ALARM`; `sysinfo.uptime` cũng được cộng.
+- Không hook Java `SystemClock`: AOSP đi qua native `clock_gettime`, hook thêm
+  sẽ cộng offset hai lần.
+- `system_server`, module UI, app ngoài scope giữ uptime thật.
+
+### Service list và timestamp
+
+- `ServiceManager.listServices`/`getService`/`checkService` lọc theo keyword
+  case-insensitive; đây là mô hình keyword, không phải baseline tuyệt đối.
+  Direct binder `IServiceManager` vẫn bypass.
+- Timestamp chỉ patch self package: neo `ro.build.date.utc` + 60–120 ngày;
+  `lastUpdateTime` = anchor + 0–14 ngày và clamp `<= now`; phủ proxy/list.
+- `hooks.service_list_spoof=1`, `hooks.package_info_times=1` là default.
+
+### Còn lại
+
+- Chưa test device/emulator; chưa có CI run cho changes này.
+- `/proc/self/stat` starttime và raw syscall/vDSO clock reads vẫn bypass.
+- `/proc/uptime` idle được clamp theo uptime đã chỉnh; chỉ là heuristic.
+- Đổi min/max ngày cần companion restart/relaunch để chọn target mới.

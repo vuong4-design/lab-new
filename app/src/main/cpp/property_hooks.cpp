@@ -222,6 +222,8 @@ void InstallPropertyHooks(bool installPropertyGet,
             reinterpret_cast<void**>(&orig_sp_read), "/libc.so");
     }
 
+    InstallUptimeHooks();
+
     RegisterNativeHooksForPendingModules();
     bool coreCommitted = ZygiskPltHookCommit();
     g_synthetic_pi_allowed.store(installPropertyFind && has_read

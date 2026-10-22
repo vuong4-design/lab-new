@@ -42,6 +42,12 @@ public class ConfigManager {
             + "com.saurik.substrate,eu.chainfire.supersu,com.noshufou.android.su,"
             + "com.koushikdutta.superuser,com.kingroot.kinguser";
 
+    private static final String DEFAULT_SERVICE_HIDDEN_KEYWORDS =
+            "lsposed,lspd,edxp,zygisk,magisk,kernelsu,ksud,apatch,shamiko,"
+            + "susfs,frida,qemu,goldfish,ranchu,redroid,waydroid,cuttlefish,"
+            + "bluestacks,ldplayer,mumu,memu,genymotion,uiautomator,"
+            + "instrumentation";
+
     private static final String[] CONFIG_PATHS = {
         "/data/data/com.devicespooflab.hooks/files/device_profile.conf",
     };
@@ -438,7 +444,12 @@ public class ConfigManager {
         defaults.put("hooks.hide_accounts", "0");
         defaults.put("hooks.hide_detection_packages", "1");
         defaults.put("hooks.hidden_packages", DEFAULT_HIDDEN_PACKAGES);
-        defaults.put("hooks.package_info_times", "0");
+        defaults.put("hooks.uptime_spoof", "1");
+        defaults.put("hooks.uptime_target_min_days", "1");
+        defaults.put("hooks.uptime_target_max_days", "7");
+        defaults.put("hooks.service_list_spoof", "1");
+        defaults.put("hooks.service_hidden_keywords", DEFAULT_SERVICE_HIDDEN_KEYWORDS);
+        defaults.put("hooks.package_info_times", "1");
         defaults.put("debug.java_hooks", "1");
         defaults.put("debug.java_hooks_disabled_packages", "");
         defaults.put("debug.system_server_hooks", "1");
@@ -648,9 +659,14 @@ public class ConfigManager {
                 "fake_sim.active_modem_count", "fake_sim.supported_modem_count",
                 "fake_sim.network_type_voice", "fake_sim.network_type_data");
 
+        appendConfigBlock(sb, defaults, emitted, "Runtime surface spoofing",
+                "hooks.uptime_spoof", "hooks.uptime_target_min_days",
+                "hooks.uptime_target_max_days", "hooks.service_list_spoof",
+                "hooks.service_hidden_keywords", "hooks.package_info_times");
+
         appendConfigBlock(sb, defaults, emitted, "Behavior flags",
                 "hooks.hide_accounts", "hooks.hide_detection_packages",
-                "hooks.hidden_packages", "hooks.package_info_times",
+                "hooks.hidden_packages",
                 "debug.java_hooks", "debug.java_hooks_disabled_packages",
                 "debug.system_server_hooks",
                 "debug.package_info_mode", "debug.package_info_strategy",
@@ -1070,6 +1086,17 @@ public class ConfigManager {
         return cachedBuildIncremental;
     }
 
+    public static long getBuildDateUtcSeconds() {
+        String value = getConfigValue("ro.build.date.utc");
+        if (value != null && !value.isEmpty()) {
+            try {
+                return Long.parseLong(value);
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return 1749081600L;
+    }
+
     public static String getBuildVersionCodename() {
         return getConfigValue("ro.build.version.codename");
     }
@@ -1160,7 +1187,20 @@ public class ConfigManager {
     }
 
     public static boolean isPackageInfoTimeHookEnabled() {
-        return propBoolDef("hooks.package_info_times", false);
+        return propBoolDef("hooks.package_info_times", true);
+    }
+
+    public static boolean isUptimeSpoofEnabled() {
+        return propBoolDef("hooks.uptime_spoof", true);
+    }
+
+    public static boolean isServiceListSpoofEnabled() {
+        return propBoolDef("hooks.service_list_spoof", true);
+    }
+
+    public static String getServiceHiddenKeywordsRaw() {
+        String configured = propStringDef("hooks.service_hidden_keywords", "");
+        return configured.isEmpty() ? DEFAULT_SERVICE_HIDDEN_KEYWORDS : configured;
     }
 
     public static boolean isHideDetectionPackagesEnabled() {

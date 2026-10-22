@@ -61,9 +61,17 @@ void InstallSystemHooks();
 
 void InstallGpuHooks();
 
+void SetUptimeSpoofState(bool enabled, long long offsetSeconds);
+
+bool IsUptimeSpoofEnabled();
+
+long long GetUptimeOffsetSeconds();
+
+void InstallUptimeHooks();
+
 // Installs the native /proc + /sys read guard (maps/smaps/meminfo/sys-net/
 // readlink) across every loaded module. Registers only; the caller commits.
-void InstallPathGuardHooks();
+void InstallPathGuardHooks(bool allowFullGuard = true);
 
 // Re-applies registered PLT hooks on .so files loaded after the initial install.
 void InstallDlopenHooks();

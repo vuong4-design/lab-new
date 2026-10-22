@@ -26,8 +26,6 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 
-// Install times reported as 60-120 days ago, derived from android_id so the
-// per-install value stays stable across reads.
 public class PackageInfoHooks {
 
     private static final String TAG = "DeviceSpoofLab-PackageInfo";
@@ -264,6 +262,9 @@ public class PackageInfoHooks {
                 return hiddenResult(method);
             }
             Object result = invokeOriginal(method, args);
+            if (plan.times) {
+                patchPackageInfoResult(lpparam, result);
+            }
             if (plan.lists && isInstalledListMethod(methodName)) {
                 return filterInstalledResult(lpparam, result);
             }
@@ -659,6 +660,33 @@ public class PackageInfoHooks {
                         String.class, flags, int.class, patcher);
             }
         } catch (Throwable t) { /* optional AsUser flags overload */ }
+
+        XC_MethodHook listPatcher = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                patchPackageInfoResult(lpparam, param.getResult());
+            }
+        };
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getInstalledPackages",
+                    int.class, listPatcher);
+        } catch (Throwable t) { logFail("getInstalledPackages(int)", t); }
+
+        try {
+            XposedHelpers.findAndHookMethod(appPm, "getInstalledPackagesAsUser",
+                    int.class, int.class, listPatcher);
+        } catch (Throwable t) { /* optional AsUser overload */ }
+
+        try {
+            Class<?> flags = XposedHelpers.findClassIfExists(
+                    "android.content.pm.PackageManager$PackageInfoFlags", lpparam.classLoader);
+            if (flags != null) {
+                XposedHelpers.findAndHookMethod(appPm, "getInstalledPackages",
+                        flags, listPatcher);
+                XposedHelpers.findAndHookMethod(appPm, "getInstalledPackagesAsUser",
+                        flags, int.class, listPatcher);
+            }
+        } catch (Throwable t) { /* Android 13+ overload may not exist here */ }
     }
 
     private static void hookGetInstallerPackageName(LoadPackageParam lpparam) {
@@ -787,18 +815,52 @@ public class PackageInfoHooks {
         }
     }
 
+    private static void patchPackageInfoResult(LoadPackageParam lpparam, Object result) {
+        if (result instanceof PackageInfo) {
+            patch((PackageInfo) result, lpparam);
+            return;
+        }
+        if (result instanceof List<?>) {
+            patchPackageInfoList(lpparam, (List<?>) result);
+            return;
+        }
+        if (result == null) return;
+        try {
+            Method getList = result.getClass().getMethod("getList");
+            Object listObject = getList.invoke(result);
+            if (listObject instanceof List<?>) {
+                patchPackageInfoList(lpparam, (List<?>) listObject);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void patchPackageInfoList(LoadPackageParam lpparam, List<?> list) {
+        for (Object item : list) {
+            if (item instanceof PackageInfo) {
+                patch((PackageInfo) item, lpparam);
+            }
+        }
+    }
+
     private static void patch(PackageInfo pi, LoadPackageParam lpparam) {
         if (pi == null || !shouldSpoofTargetPackage(lpparam, pi.packageName)) return;
-        long install = stableInstallTime();
+        long now = System.currentTimeMillis();
+        long install = Math.min(stableInstallTime(), now);
+        long update = install
+                + (Math.abs(stableHash(pi.packageName)) % (14L * DAY_MS));
+        if (update > now) update = now;
         pi.firstInstallTime = install;
-        pi.lastUpdateTime = install + (Math.abs(stableHash(pi.packageName)) % (14L * DAY_MS));
+        pi.lastUpdateTime = update;
     }
 
     private static long stableInstallTime() {
-        // 60-120 days before now, stable per android_id.
+        long buildSeconds = ConfigManager.getBuildDateUtcSeconds();
+        long buildMillis = buildSeconds > 0
+                ? buildSeconds * 1000L : 1749081600000L;
         long seed = Math.abs(ConfigManager.getFingerprintSeed());
         long offsetDays = 60 + (seed % 61);
-        return System.currentTimeMillis() - offsetDays * DAY_MS;
+        return buildMillis + offsetDays * DAY_MS;
     }
 
     private static long stableHash(String s) {
